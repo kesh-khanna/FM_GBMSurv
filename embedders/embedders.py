@@ -49,6 +49,9 @@ class BrainMVPEmbedder(BaseEmbedder):
 
 class BrainSegFounderEmbedder(BaseEmbedder):
     """
+    Input:  x [B, M, H, W, D]
+    Output:
+      z_patient [B, 768]
     """
     def __init__(
         self,

@@ -19,13 +19,11 @@ from optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
 from torchsurv.metrics.auc import Auc
 from torchsurv.metrics.cindex import ConcordanceIndex
 import yaml
-import gc
 from tqdm import tqdm
 import logging
 from torch.amp import GradScaler
 import json
 from typing import Dict, Any
-import matplotlib.pyplot as plt
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -38,236 +36,14 @@ import torch
 print(torch.__version__)
 import torch.nn as nn
 
-from monai.utils import ensure_tuple_rep, look_up_option, optional_import
-
-from backbones.uniformer import UniFormer, set_trainable_uniformer
-from transforms.transforms import SmartWeightedCrop
-from backbones.swin_encoder import SwinTransformer
-from embedders.embedders import BrainMVPEmbedder, BrainSegFounderEmbedder
-from classifiers.survival_models import DeepSurvNet
-
-def set_seed(seed):
-    random.seed(seed)
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-    # torch.backends.cudnn.deterministic = True
-    # torch.backends.cudnn.benchmark = False
-    torch.set_float32_matmul_precision('high')
-
-
-def clear_memory():
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        gc.collect()
-
-def custom_transform(config):
-    """
-    Create custom transforms for training and validation
-    """
-    roi_type = config["training"].get("roi_type", "random")
-    if roi_type == "random":
-        print("Using random cropping for training and validation")
-        
-        train_transform = transforms.Compose([
-            transforms.LoadImaged(keys=['image']),
-            transforms.EnsureChannelFirstd(keys=["image"]),
-            transforms.ScaleIntensityRangePercentilesd(keys=['image'], lower=5, upper=95, b_min=0.0, b_max=1.0, channel_wise=True),
-            transforms.Orientationd(keys=['image'], axcodes='RAS'),
-            transforms.Spacingd(keys=['image'], pixdim=(1.0, 1.0, 1.0), mode='bilinear'),
-            # transforms.CropForegroundd(keys=['image'], source_key='image', margin=1),
-            transforms.CropForegroundd(keys=['image'], source_key='image'),
-            transforms.RandSpatialCropd(keys=['image'], roi_size=config["training"].get("train_patch_shape", 160), random_size=False),  
-            transforms.SpatialPadd(keys=['image'], spatial_size=config["training"].get("train_patch_shape", 160), mode='constant'),
-            # transforms.RandFlipd(keys=['image'], spatial_axis=(0, 1, 2), prob=0.5),
-            transforms.RandShiftIntensityd(keys=['image'], offsets=0.1, prob=0.3),
-            transforms.RandScaleIntensityd(keys=['image'], factors=0.1, prob=0.3),
-            transforms.ToTensord(keys=["image", "label", "event"], dtype=torch.float32, track_meta=False)
-        ])
-
-    elif roi_type == "seg_weighted":
-        print("Using random cropping, weighted by tumor segmentation")
-        train_transform = transforms.Compose([
-        transforms.LoadImaged(keys=['image', "seg"], allow_missing_keys=True),
-        transforms.EnsureChannelFirstd(keys=["image", "seg"], allow_missing_keys=True),
-        transforms.ScaleIntensityRangePercentilesd(
-            keys=['image'], lower=5, upper=95, 
-            b_min=0.0, b_max=1.0, channel_wise=True
-        ),
-        transforms.Orientationd(keys=['image', "seg"], axcodes='RAS', allow_missing_keys=True),        
-        transforms.Spacingd(keys=['image', "seg"], pixdim=(1.0, 1.0, 1.0), mode='bilinear', allow_missing_keys=True),
-        transforms.CropForegroundd(keys=['image', "seg"], source_key='image', allow_missing_keys=True),        
-        # not sure if we need to crop foreground if we are doing weighted crop later
-        # comment out if you want non binary weighting
-        transforms.Lambdad(
-            keys=['seg'],
-            func=lambda x: (x > 0).astype(np.float32),  # Any non-zero label becomes 1 
-            allow_missing_keys=True
-        ),  
-        SmartWeightedCrop( # handles the case that a patient doesnt have a seg available
-            keys=['image'],
-            seg_key='seg',
-            spatial_size=config["training"].get("train_patch_shape", 160),
-        ),
-        # Don't need seg anymore, can remove it
-        transforms.DeleteItemsd(keys=['seg']),
-        transforms.SpatialPadd(
-            keys=['image'], 
-            spatial_size=config["training"].get("train_patch_shape", 160), 
-            mode='constant'
-        ),
-        transforms.RandShiftIntensityd(keys=['image'], offsets=0.1, prob=0.3),
-        transforms.RandScaleIntensityd(keys=['image'], factors=0.1, prob=0.3),
-        ToTensord(keys=["image", "label", "event"], dtype=torch.float32, track_meta=False, allow_missing_keys=False)
-    ])
-    else:
-        raise ValueError(f"Unsupported roi_type: {roi_type}. Supported types: random, seg_weighted")
-        
-    val_transform = transforms.Compose([
-            transforms.LoadImaged(keys=['image']),
-            transforms.EnsureChannelFirstd(keys=["image"]),
-            transforms.ScaleIntensityRangePercentilesd(keys=['image'], lower=5, upper=95, b_min=0.0, b_max=1.0, channel_wise=True),
-            transforms.Orientationd(keys=['image'], axcodes='RAS'),
-            transforms.Spacingd(keys=['image'], pixdim=(1.0, 1.0, 1.0), mode='bilinear'),
-            transforms.CropForegroundd(keys=['image'], source_key='image', margin=1),
-            transforms.RandSpatialCropd(keys=['image'], roi_size=config["training"].get("val_patch_shape", 160), random_size=False),  # Can remove
-            transforms.SpatialPadd(keys=['image'], spatial_size=config["training"].get("val_patch_shape", 160), mode='constant'), # poss remove
-            transforms.ToTensord(keys=["image", "label", "event"], dtype=torch.float32, track_meta=False)
-        ])
-    
-    return train_transform, val_transform
-
-def create_model(config):
-    """
-    create the encoder and wrap the encoder in the embedding model. could change to pass configs individually
-    """
-    encoder = UniFormer(depth=config["model"]["depths"], img_size=config["model"]["img_size"], in_chans=config["model"]["in_chans"], num_classes=1)
-
-    if os.path.exists(config["model"]["pretrained_weights"]) and config["model"].get("use_pretrained_weights", True):
-        logger.info(f"Loading pretrained weights from {config['model']['pretrained_weights']}")
-        # load in the weights
-        weights = torch.load(config["model"]["pretrained_weights"], map_location="cpu")
-
-        state_dict = {}
-        for key in weights['state_dict'].keys():
-            new_key = key.replace('module.', '').replace('uniformer.', '').replace('encoder.', '')
-            state_dict[new_key] = weights['state_dict'][key]
-        
-        # duplicate the patch embedding 1 layer to accomadate k input channels insted of the 1 in the pretrained model
-        if config["model"]["in_chans"] != 1:
-            logger.info(f"Duplicating patch embedding weights to accomodate {config['model']['in_chans']} input channels")
-            old_weight = state_dict['patch_embed1.proj.weight']  # [out_channels, in_channels, k, k, k]
-            new_weight = old_weight.repeat(1, config["model"]["in_chans"], 1, 1, 1) / config["model"]["in_chans"]
-            state_dict['patch_embed1.proj.weight'] = new_weight
-        
-        out = encoder.load_state_dict(state_dict, strict=False)
-        print(f"Missing Keys: {out.missing_keys}")
-        print(f"Unexpected Keys: {out.unexpected_keys}")
-        print(f"Length of Missing Keys: {len(out.missing_keys)}")
-        print(f"Length of Unexpected Keys: {len(out.unexpected_keys)}")
-
-    elif config["model"].get("use_pretrained_weights", True):
-        logger.warning(f"Pretrained weights not found at {config['model']['pretrained_weights']}. Training model from scratch.")
-
-    else:
-        logger.info("Training model from scratch")
-    
-    
-    brain_embedder = BrainMVPEmbedder(
-        encoder=encoder,
-        stage_idx=4,
-        token_pool="gap",
-        feat_dim=512,
-    )
-    
-    # freeze portions of the encoder if needed
-    # by default only the final stage and norm layers are trainable
-    set_trainable_uniformer(
-        encoder,
-        train_patch_embed1=config["model"].get("train_patch_embed1", False),
-        train_stage1=config["model"].get("train_stage1", False),
-        train_stage2=config["model"].get("train_stage2", False),
-        train_stage3=config["model"].get("train_stage3", False),
-        train_stage4=config["model"].get("train_stage4", True),
-        train_final_norm=config["model"].get("train_final_norm", True),
-        train_all_layernorm=config["model"].get("train_all_layernorm", True),
-        train_all_batchnorm=config["model"].get("train_all_batchnorm", False),
-    )
-
-    model = DeepSurvNet(
-        embedder=brain_embedder,
-        embedding_dim=512,
-        hidden_dims=config["model"].get("hidden_dims", [256]),
-        return_embeddings=config["model"].get("return_embeddings", False)
-    )
-
-    trainable = [(n, p.numel()) for n,p in model.named_parameters() if p.requires_grad]
-    print("Trainable params:", sum(x[1] for x in trainable))
-    print("\n".join([n for n,_ in trainable[:50]]), "...")
-    return model
-
-def create_model_brainseg(config):
-    # some hardcoded values to match the weights, can move to configs if you want to change them
-    spatial_dims = 3 
-    img_size = ensure_tuple_rep(config["model"]["img_size"], spatial_dims)
-    patch_sizes = ensure_tuple_rep(2, spatial_dims)
-    window_size = ensure_tuple_rep(7, spatial_dims)
-    num_heads = [3, 6, 12, 24]
-    feature_size = 48
-
-    encoder = SwinTransformer(
-            in_chans=config["model"]["in_channels"],
-            embed_dim=feature_size,
-            window_size=window_size,
-            patch_size=patch_sizes,
-            depths=config["model"]["depths"],
-            num_heads=num_heads,
-            mlp_ratio=4.0,
-            qkv_bias=True,
-            drop_rate=config["model"]["drop_rate"],
-            attn_drop_rate=config["model"]["attn_drop_rate"],
-            drop_path_rate=config["model"]["dropout_path_rate"],
-            norm_layer=nn.LayerNorm,
-            use_checkpoint=False,
-            spatial_dims=spatial_dims,
-            downsample="merging",
-            use_v2=False,
-        )   
-
-    if os.path.exists(config["model"]["pretrained_weights"]) and config["model"].get("use_pretrained_weights", True):
-        logger.info(f"Loading pretrained weights from {config['model']['pretrained_weights']}")
-        checkpoint = torch.load(config["model"]["pretrained_weights"], weights_only=False)
-
-        pretrained_state_dict = checkpoint['state_dict']
-        
-        # load in only the swinViT weights
-        new_state_dict = {}
-        for k, v in pretrained_state_dict.items():
-            if k.startswith('module.swinViT.'):
-                new_key = k.replace('module.swinViT.', '')
-                new_state_dict[new_key] = v
-
-        out = encoder.load_state_dict(new_state_dict, strict=False)
-        print(f"Missing Keys: {out.missing_keys}")
-        print(f"Unexpected Keys: {out.unexpected_keys}")
-        print(f"Length of Missing Keys: {len(out.missing_keys)}")
-        print(f"Length of Unexpected Keys: {len(out.unexpected_keys)}")
-        print("Pretrained weights loaded successfully.")
-
-    
-
-
-
-def set_bn_eval(m):
-    if isinstance(m, torch.nn.modules.batchnorm._BatchNorm):
-        m.eval()
+from create_model import create_model
+from transforms.transforms import custom_transform
+from utils.torch_utils import set_seed, clear_memory, set_bn_eval
 
 def create_optimizer_scheduler(model, config):
     """
     Create optimizer + scheduler with two learning rates:
-      - backbone_lr: model.embedder.encoder (UniFormer)
+      - backbone_lr: model.embedder.encoder (i.e. UniFormer)
       - head_lr: everything else (pooling + survival head)
     Only includes params with requires_grad=True.
     """
@@ -513,8 +289,7 @@ class ModelTrainer:
                         reduction="mean"
                     )
 
-                # Optional: skip if no events in this mini-batch
-                # (Without this, many Cox implementations return 0.0 or NaN)
+                # skip if no events in this mini-batch. Consider stratified batch sampling if event rate is low
                 if events.sum() == 0:
                     if not disable_pbar:
                         tqdm.write(f"Batch {batch_idx+1}: no events, skipping update")
@@ -923,10 +698,8 @@ def main():
 
     train_ds = CacheDataset(data=train_data, transform=train_transforms, cache_rate=train_cache_rate, num_workers=4) if train_data else None
     val_ds   = CacheDataset(data=val_data,   transform=val_transforms, cache_rate=val_cache_rate, num_workers=4) if val_data else None
-
     # no need to cache the test set
     test_ds  = Dataset(data=test_data,  transform=val_transforms) if test_data else None
-
     # create a ds for the training set with validation transforms for final eval
     eval_train_ds = Dataset(data=train_data, transform=val_transforms) if train_data else None
 
@@ -934,11 +707,6 @@ def main():
     val_loader   = DataLoader(val_ds,   batch_size=config["data"]["val_batch_size"], shuffle=False, num_workers=config["data"]["workers"], pin_memory=True, persistent_workers=True) if val_ds else None
     test_loader  = DataLoader(test_ds,  batch_size=config["data"]["val_batch_size"], shuffle=False, num_workers=config["data"]["workers"], pin_memory=True, persistent_workers=True) if test_ds else None
     eval_train_dataloader = DataLoader(eval_train_ds, batch_size=config["data"]["val_batch_size"], shuffle=False, num_workers=config["data"]["workers"], pin_memory=True, persistent_workers=True) if eval_train_ds else None
-
-    print(f"Number of training batches: {len(train_loader) if train_loader else 0}")
-    print(f"Number of validation batches: {len(val_loader) if val_loader else 0}")
-    print(f"Number of test batches: {len(test_loader) if test_loader else 0}")
-    print(f"Number of eval train batches: {len(eval_train_dataloader) if eval_train_dataloader else 0}")
 
     model = create_model(config)
 
