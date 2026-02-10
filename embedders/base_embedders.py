@@ -1,0 +1,43 @@
+
+"""
+Abstract base classes for flexible multi-model architecture
+"""
+from abc import ABC, abstractmethod
+import torch
+import torch.nn as nn
+from typing import List, Tuple, Optional
+
+
+class BaseEmbedder(ABC, nn.Module):
+    """
+    Abstract base class for all embedding heads and associated backbones.
+    Ensures consistent interface across BrainMVP, BrainSegFounder, and BrainIAC.
+    """
+    
+    def __init__(self, embedding_dim: int):
+        super().__init__()
+        self.embedding_dim = embedding_dim
+    
+    @abstractmethod
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor of shape [B, 4, H, W, D] (4 modalities)
+            
+        Returns:
+            embeddings: Tensor of shape [B, embedding_dim]
+        """
+        pass
+    
+    @abstractmethod
+    def get_intermediate_features(self, x: torch.Tensor) -> dict:
+        """
+        intermediate features for visualization/analysis.
+        
+        Args:
+            x: Input tensor [B, 4, H, W, D]
+            
+        Returns:
+            dict with intermediate features
+        """
+        pass
