@@ -111,12 +111,12 @@ def custom_transform(config):
     """
     Create custom transforms for training and validation
     """
-    train_roi_type = config["training"].get("train_roi_type", None)
+    train_roi_type = config["data"].get("train_roi_type", None)
     if train_roi_type is None:
         print("No training ROI type provided in the config, falling back to random ROI")
         train_roi_type = "random"
 
-    val_roi_type = config["training"].get("val_roi_type", None)
+    val_roi_type = config["data"].get("val_roi_type", None)
     if val_roi_type is None:
         print("No validation ROI type provided in the config, falling back to random ROI")
         val_roi_type = "random"
@@ -228,7 +228,6 @@ def custom_transform(config):
             spatial_size=val_patch_shape,
             mode='constant'
         ),
-        # optionally add a bit of augmentation
         transforms.ToTensord(keys=["image", "label", "event"], dtype=torch.float32, track_meta=False, allow_missing_keys=False)
         ])
 
@@ -260,7 +259,6 @@ def custom_transform(config):
             spatial_size=val_patch_shape,
             mode='constant'
         ),
-        # optionally add a bit of augmentation
         transforms.ToTensord(keys=["image", "label", "event"], dtype=torch.float32, track_meta=False, allow_missing_keys=False)
         ])
 

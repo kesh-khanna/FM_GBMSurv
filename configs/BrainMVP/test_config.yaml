@@ -1,0 +1,73 @@
+data:
+  json_file: "/data/nextgen/keshk/foundation_models/BrainMVP/survival/splits/nci_split.json"
+  batch_size: 16
+  val_batch_size: 1
+  workers: 8
+  train_roi_type: "random"
+  val_roi_type: "random"
+  train_cache_rate: 0.3
+  val_cache_rate: 0.0
+
+model:
+  type: "brainmvp"  
+
+  # spatial sizes (used by UniFormer constructor / transforms)
+  img_size: 160                # single integer assumed to mean cubic (160^3); matches patch_shape below
+
+  # channels / architecture
+  in_chans: 4                 
+  out_channels: 1
+
+  # uniformer / swin-like args
+  depths: [3, 4, 8, 3]
+  drop_rate: 0.2
+  attn_drop_rate: 0.0
+  drop_path_rate: 0.0
+  # hidden_dims: []
+
+  # pretrained weights control (you switched to this flag)
+  use_pretrained_weights: True
+  pretrained_weights: "/data/nextgen/keshk/foundation_models/BrainMVP/models/BrainMVP_uniformer.pt"
+
+  # checkpoint path (optional override for prediction-only usage)
+  checkpoint_path: ""
+
+  # fine-tuning / freezing controls (mapped to set_trainable_uniformer usage)
+  train_patch_embed1: True        # for stacked modalities you usually want patch_embed1 trainable
+  train_stage1: True
+  train_stage2: True
+  train_stage3: True
+  train_stage4: True              # we keep final stage trainable (LoRA targets there)
+  train_final_norm: True
+  train_all_layernorm: True
+  train_all_batchnorm: True      # will require explicit BN.eval() enforcement in training loop to freeze running stats
+
+training:
+  max_epochs: 25
+  seed: 42
+  backbone_lr: 5e-5   # LR for encoder (UniFormer)
+  head_lr: 1e-4       # LR for head (DeepSurvNet)
+  reg_weight: 1e-4
+  warmup_epochs: 5
+  mixed_precision: True
+  patience: 10
+  checkpoint_frequency: 25
+  new_time: 365.0
+  save_top_k: 2
+  lrscheduler: "cosine_anneal"
+  optim_name: "adamw"
+
+  shift_intensity: 0.3
+  scale_intensity: 0.3
+
+  validation_mode: "monitor_only" # options: "monitor_only", "early_stopping", "none"
+  use_last_model: True
+
+  # patch/crop size used in transforms (your code reads config["training"].get("patch_shape",160))
+  val_patch_shape: [160, 160, 160]
+  train_patch_shape: [96, 96, 96]
+
+output:
+  path: "/data/nextgen/keshk/foundation_models/FM_GBMSurv/out/nci_test_brainmvp"
+  save_name: "finetune_aug"
+  prediction_dir: "preds"

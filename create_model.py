@@ -26,7 +26,7 @@ def create_model(config: Dict[str, Any]) -> nn.Module:
         if model_type == "brainmvp":
             return create_model_brainmvp(config)
         elif model_type == "brainseg":
-            return create_model_brainmvp(config)
+            return create_model_brainseg(config)
         else:
             raise ValueError(
                 f"Unknown model type: {model_type}. "
@@ -126,7 +126,7 @@ def create_model_brainseg(config):
         raise ValueError("feature_size should be divisible by 12.")
 
     encoder = SwinTransformer(
-            in_chans=config["model"]["in_channels"],
+            in_chans=config["model"]["in_chans"],
             embed_dim=feature_size,
             window_size=window_size,
             patch_size=patch_sizes,
