@@ -11,9 +11,6 @@ data:
 model:
   type: "brainmvp"  
 
-  # spatial sizes (used by UniFormer constructor / transforms)
-  img_size: 160                # single integer assumed to mean cubic (160^3); matches patch_shape below
-
   # channels / architecture
   in_chans: 4                 
   out_channels: 1
@@ -25,28 +22,28 @@ model:
   drop_path_rate: 0.0
   # hidden_dims: []
 
-  # pretrained weights control (you switched to this flag)
+  # pretrained weights control
   use_pretrained_weights: True
   pretrained_weights: "/data/nextgen/keshk/foundation_models/BrainMVP/models/BrainMVP_uniformer.pt"
 
   # checkpoint path (optional override for prediction-only usage)
   checkpoint_path: ""
 
-  # fine-tuning / freezing controls (mapped to set_trainable_uniformer usage)
-  train_patch_embed1: True        # for stacked modalities you usually want patch_embed1 trainable
+  # fine-tuning / freezing controls, the specific names are model dependent, by default, if they aren't passed then the full encoder will be trainable
+  train_patch_embed1: True
   train_stage1: True
   train_stage2: True
   train_stage3: True
-  train_stage4: True              # we keep final stage trainable (LoRA targets there)
+  train_stage4: True             
   train_final_norm: True
   train_all_layernorm: True
-  train_all_batchnorm: True      # will require explicit BN.eval() enforcement in training loop to freeze running stats
+  train_all_batchnorm: True     
 
 training:
   max_epochs: 25
   seed: 42
-  backbone_lr: 5e-5   # LR for encoder (UniFormer)
-  head_lr: 1e-4       # LR for head (DeepSurvNet)
+  backbone_lr: 5e-5   # LR for encoder and backbone 
+  head_lr: 1e-4       # LR for head 
   reg_weight: 1e-4
   warmup_epochs: 5
   mixed_precision: True
@@ -57,13 +54,14 @@ training:
   lrscheduler: "cosine_anneal"
   optim_name: "adamw"
 
+  # additional augmentation during training
   shift_intensity: 0.3
   scale_intensity: 0.3
 
-  validation_mode: "monitor_only" # options: "monitor_only", "early_stopping", "none"
-  use_last_model: True
+  evaluation_strategy: "best_val_cindex"
+    # current options include "best_val_c_index" or "last_epoch"
+    # if best_val_c_index, then early stopping will be enabled based on the chosen patience
 
-  # patch/crop size used in transforms (your code reads config["training"].get("patch_shape",160))
   val_patch_shape: [160, 160, 160]
   train_patch_shape: [96, 96, 96]
 
