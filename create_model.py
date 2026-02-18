@@ -1,7 +1,5 @@
 """
 Author: Rakesh Khanna
-
-
 """
 
 from backbones.uniformer import UniFormer, set_trainable_uniformer
@@ -18,7 +16,6 @@ import torch
 def create_model(config: Dict[str, Any]) -> nn.Module:
         """
         Create a model based on yaml config.
-
         Must have 'model.type' specifying the model type. Supported types: 'brainmvp', 'brainseg'
         """
         model_type = config["model"].get("type", "brainmvp").lower()
@@ -50,6 +47,7 @@ def create_model_brainmvp(config):
             state_dict[new_key] = weights['state_dict'][key]
         
         # duplicate the patch embedding 1 layer to accomadate k input channels insted of the 1 in the pretrained model
+        # can change to full single modalities passes if alternative fusion methods are desired
         if config["model"]["in_chans"] != 1:
             print(f"Duplicating patch embedding weights to accomodate {config['model']['in_chans']} input channels")
             old_weight = state_dict['patch_embed1.proj.weight']  # [out_channels, in_channels, k, k, k]
@@ -68,19 +66,18 @@ def create_model_brainmvp(config):
     else:
         print("Training model from scratch")
     
-    
     # freeze portions of the encoder if needed
     # by default only the final stage and norm layers are trainable
     set_trainable_uniformer(
         encoder,
-        train_patch_embed1=config["model"].get("train_patch_embed1", False),
-        train_stage1=config["model"].get("train_stage1", False),
-        train_stage2=config["model"].get("train_stage2", False),
-        train_stage3=config["model"].get("train_stage3", False),
+        train_patch_embed1=config["model"].get("train_patch_embed1", True),
+        train_stage1=config["model"].get("train_stage1", True),
+        train_stage2=config["model"].get("train_stage2", True),
+        train_stage3=config["model"].get("train_stage3", True),
         train_stage4=config["model"].get("train_stage4", True),
         train_final_norm=config["model"].get("train_final_norm", True),
         train_all_layernorm=config["model"].get("train_all_layernorm", True),
-        train_all_batchnorm=config["model"].get("train_all_batchnorm", False),
+        train_all_batchnorm=config["model"].get("train_all_batchnorm", True),
     )
 
     brain_embedder = BrainMVPEmbedder(
@@ -167,7 +164,6 @@ def create_model_brainseg(config):
     
         # freeze portions of the encoder if needed
         # by default everything is trainable
-        # assume that if we dont 
         set_trainable_swin(
             encoder,
             train_patch_embed=config["model"].get("train_patch_embed", True),

@@ -131,8 +131,8 @@ def custom_transform(config):
         train_transform = transforms.Compose([
             transforms.LoadImaged(keys=['image']),
             transforms.EnsureChannelFirstd(keys=["image"]),
-            transforms.ScaleIntensityRangePercentilesd(keys=['image'], lower=5, upper=95, b_min=0.0, b_max=1.0, channel_wise=True),
-            transforms.Orientationd(keys=['image'], axcodes='RAS'),
+            transforms.ScaleIntensityRangePercentilesd(keys=['image'], lower=5, upper=95, b_min=0.0, b_max=1.0, channel_wise=True), #TODO allow selection of various different normalization techniques
+            transforms.Orientationd(keys=['image'], axcodes='RAS'), # TODO allow the selection of different Orientation schemes
             transforms.Spacingd(keys=['image'], pixdim=(1.0, 1.0, 1.0), mode='bilinear'),
             transforms.CropForegroundd(keys=['image'], source_key='image'),
             transforms.RandSpatialCropd(keys=['image'], roi_size=96, random_size=False),  

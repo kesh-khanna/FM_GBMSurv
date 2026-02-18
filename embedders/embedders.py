@@ -6,7 +6,7 @@ Model-specific encoder implementations
 import torch
 import torch.nn as nn
 from typing import Optional
-from base_embedders import BaseEmbedder
+from embedders.base_embedders import BaseEmbedder
 
 
 class BrainMVPEmbedder(BaseEmbedder):

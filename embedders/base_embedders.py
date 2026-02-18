@@ -8,7 +8,7 @@ import torch.nn as nn
 from typing import List, Tuple, Optional
 
 
-class BaseEmbedder(ABC, nn.Module):
+class BaseEmbedder(nn.Module, ABC):
     """
     Abstract base class for all embedding heads and associated backbones.
     Ensures consistent interface across BrainMVP, BrainSegFounder, and BrainIAC.

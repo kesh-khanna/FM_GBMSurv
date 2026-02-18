@@ -53,17 +53,12 @@ def create_optimizer_scheduler(model, config):
     head_lr = float(config["training"].get("head_lr", config["training"].get("optim_lr", 1e-3)))
     optim_name = config["training"]["optim_name"].lower()
 
-    # Split params
-    encoder_params = []
-    head_params = []
-
-    for name, p in model.named_parameters():
-        if not p.requires_grad:
-            continue
-        if name.startswith("embedder.encoder"):
-            encoder_params.append(p)
-        else:
-            head_params.append(p)
+    if hasattr(model, "get_param_groups") and callable(model.get_param_groups):
+        groups = model.get_param_groups()
+        encoder_params = [p for p in groups.get("backbone", []) if p.requires_grad]
+        head_params = [p for p in groups.get("head", []) if p.requires_grad]
+    else:
+        raise AttributeError(f"{model.__class__.__name__} must implement get_param_groups()")
 
     print(f"Using two LRs: backbone_lr={backbone_lr} head_lr={head_lr} wd={wd} optim={optim_name}")
     print(f"Trainable params: encoder={sum(p.numel() for p in encoder_params):,} "
@@ -455,8 +450,6 @@ class ModelTrainer:
             # Training
             self.train_epoch(train_loader, disable_pbar=disable_pbar)
             
-            # step the scheduler
-            # I think this should be done every epoch
             if self.scheduler is not None:
                 self.scheduler.step()
 
@@ -464,7 +457,6 @@ class ModelTrainer:
             if val_loader is not None and self.validation_mode != "none":
                 val_loss, val_auc, val_c = self.validate_full_dataset(val_loader, disable_pbar=disable_pbar)
                 
-                # Track best model (for logging/monitoring)
                 monitor = val_c
                 is_best = monitor > self.best_score
                 
@@ -491,10 +483,7 @@ class ModelTrainer:
             if (epoch + 1) % self.checkpoint_frequency == 0 or (epoch + 1) == self.max_epochs:
                 self.save_checkpoint(is_best=False)
             
-            # clear the memory after each epoch?
-            # Should explore the pros and cons and maybe track memory usage overtime
-            # clear_memory()
-        
+
         training_time = (time.time() - start_time) / 60
         logger.info(f"Training completed in {training_time:.2f} minutes")
         
