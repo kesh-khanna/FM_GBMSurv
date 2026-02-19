@@ -55,8 +55,8 @@ The framework expects a JSON file containing train/validation/test splits with t
 }
 ```
 
-**Field Descriptions:**
-- **`patient_id`**: Unique patient identifier
+**Fields:**
+- **`patient_id`**: Unique patient identifier (mainly for organizing predictions)
 - **`image`**: Array of paths to 4 MRI sequences [ordered T1, FLAIR, T1GD, T2]
 - **`label`**: Survival time in days
 - **`event`**: Event indicator (1 = death/event occurred, 0 = censored)
