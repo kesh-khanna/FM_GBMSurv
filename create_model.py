@@ -35,7 +35,9 @@ def create_model_brainmvp(config):
     """
     create the encoder and wrap the encoder in the embedding model. could change to pass configs individually
     """
-    encoder = UniFormer(depth=config["model"]["depths"], img_size=config["model"]["img_size"], in_chans=config["model"]["in_chans"], num_classes=1)
+    # currently defaulted to match the weights of the BrainMVP, can be overwritten in the config if needed
+    depths = config["model"].get("depths", [3, 4, 8, 3])
+    encoder = UniFormer(depth=depths, img_size=config["model"]["img_size"], in_chans=config["model"]["in_chans"], num_classes=1)
 
     if os.path.exists(config["model"]["pretrained_weights"]) and config["model"].get("use_pretrained_weights", True):
         print(f"Loading pretrained weights from {config['model']['pretrained_weights']}")
@@ -118,7 +120,7 @@ def create_model_brainseg(config):
         raise ValueError("dropout rate should be between 0 and 1.")
     if not (0 <= config["model"]["attn_drop_rate"] <= 1):
         raise ValueError("attention dropout rate should be between 0 and 1.")
-    if not (0 <= config["model"]["dropout_path_rate"] <= 1):
+    if not (0 <= config["model"]["drop_path_rate"] <= 1):
         raise ValueError("drop path rate should be between 0 and 1.")
     if feature_size % 12 != 0:
         raise ValueError("feature_size should be divisible by 12.")
@@ -128,13 +130,13 @@ def create_model_brainseg(config):
             embed_dim=feature_size,
             window_size=window_size,
             patch_size=patch_sizes,
-            depths=config["model"]["depths"],
+            depths=config["model"].get("depths", [2, 2, 6, 2]),
             num_heads=num_heads,
             mlp_ratio=4.0,
             qkv_bias=True,
             drop_rate=config["model"]["drop_rate"],
             attn_drop_rate=config["model"]["attn_drop_rate"],
-            drop_path_rate=config["model"]["dropout_path_rate"],
+            drop_path_rate=config["model"]["drop_path_rate"],
             norm_layer=nn.LayerNorm,
             use_checkpoint=False,
             spatial_dims=spatial_dims,

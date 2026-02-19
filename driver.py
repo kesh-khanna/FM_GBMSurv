@@ -164,7 +164,7 @@ class ModelTrainer:
         if "round" in checkpoint:
             logger.info(f"Round loaded from checkpoint: {checkpoint['round']}")
 
-        self.score = checkpoint['score']
+        self.score = checkpoint['best_score']
         self.global_step = checkpoint['global_step']
         self.epoch = checkpoint['epoch']
         
@@ -269,12 +269,6 @@ class ModelTrainer:
 
             if not disable_pbar:
                 tqdm.write(f"Epoch {self.epoch}, Batch {batch_idx+1}, Loss: {loss.item():.4f}")
-
-            if batch_idx == 0:
-                print("images:", images.shape, images.dtype)
-                print("log_hz:", log_hz.shape, log_hz.dtype)
-                print("allocated GB:", torch.cuda.memory_allocated()/1e9)
-                print("reserved  GB:", torch.cuda.memory_reserved()/1e9)
 
         avg_loss = total_loss / num_loss_computations if num_loss_computations > 0 else float('inf')
 
@@ -477,7 +471,7 @@ class ModelTrainer:
             # concat the tensors
             all_log_hz_tensor = torch.cat(all_log_hz, dim=0).float()
             all_time_tensor = torch.cat(all_time, dim=0).float()
-            all_events_tensor = torch.cat(all_events, dim=0).float()
+            all_events_tensor = torch.cat(all_events, dim=0).bool()
 
             # compute metrics
             test_auc = self.testing_auc(all_log_hz_tensor, all_events_tensor, all_time_tensor, new_time=self.new_time.float())

@@ -1,7 +1,5 @@
 import torch
-from typing import Tuple, Dict, Any
-from torch.optim import Optimizer
-from lr_scheduler import LinearWarmupCosineAnnealingLR
+from optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
 from classifiers.survival_models import BasePredictionModel
 
 def create_optimizer_scheduler(model: BasePredictionModel, config):

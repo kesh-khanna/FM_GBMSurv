@@ -1,0 +1,73 @@
+data:
+  json_file: "path/to/json/file/with/splits"
+  batch_size: 16 # nll estimate based on within batch comparisons, ideally > 8 for better estimates of risk
+  val_batch_size: 1
+  workers: 8
+  train_roi_type: "random" # currenlty support random, seg_weighted
+  val_roi_type: "tumor_centered" # currenlty support center_crop, seg_weighted and tumor centered
+  train_cache_rate: 0.0 
+  val_cache_rate: 0.0
+  normalization_method: "percentile" # currently zscore and 5-95 percentile scaling ("percentile") supported
+
+model:
+  type: "brainmvp"  
+  # channels / architecture
+  in_chans: 4                 
+  out_channels: 1
+  img_size: 96
+
+  # uniformer args
+  drop_rate: 0.2
+  attn_drop_rate: 0.0
+  drop_path_rate: 0.0
+  hidden_dims: [256]
+  # depths: if you want to override the depths of the weights
+
+  # pretrained weights control
+  use_pretrained_weights: True
+  pretrained_weights: "/path/to/BrainMVP/Unifomer/weights"
+
+  # checkpoint path (optional override for prediction-only usage)
+  checkpoint_path: ""
+
+  # fine-tuning / freezing controls, the specific names are model dependent
+  # by default, if they aren't passed then the full backbone will be trainable
+  train_patch_embed1: True
+  train_stage1: True
+  train_stage2: True
+  train_stage3: True
+  train_stage4: True             
+  train_final_norm: True
+  train_all_layernorm: True
+  train_all_batchnorm: True     
+
+training:
+  max_epochs: 25
+  seed: 42
+  backbone_lr: 5e-5   # LR for backbone and any pooling steps 
+  head_lr: 1e-4       # LR for classification head 
+  reg_weight: 1e-5
+  warmup_epochs: 5
+  mixed_precision: True
+  patience: 5
+  checkpoint_frequency: 25
+  new_time: 365.0
+  save_top_k: 2
+  lrscheduler: "cosine_anneal"
+  optim_name: "adamw"
+
+  # additional augmentation during training
+  shift_intensity: 0.3
+  scale_intensity: 0.3
+
+  evaluation_strategy: "last_epoch"
+    # current options include "best_val_c_index" or "last_epoch"
+    # if best_val_c_index, then early stopping will be enabled based on the chosen patience
+
+  val_patch_shape: [96, 96, 96] # [160, 160, 160] with "center_crop" gave us roughly the full brain tissue, can use smaller if you want to crop on a specific region
+  train_patch_shape: [96, 96, 96]
+
+output:
+  path: "output/path/"
+  save_name: "name_for_this_run"
+  prediction_dir: "directory/within/output_path/to/save/predictions/to"

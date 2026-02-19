@@ -79,7 +79,9 @@ class TumorCenterCrop(transforms.MapTransform):
         return d
     
     def _apply_center_crop(self, img, center):
-        """Apply crop centered on given point"""
+        """
+        Apply crop centered on given point
+        """
         img_shape = np.array(img.shape[1:])  # Spatial dimensions
         
         # Calculate start and end
@@ -120,7 +122,8 @@ def get_normalization_transform(config):
                 channel_wise=True)
     
     elif norm_method == "z_score":
-        return transforms.NormalizeIntensity(
+        return transforms.NormalizeIntensityd(
+            keys=["image"],
             nonzero=True, 
             channel_wise=True
             )
@@ -173,7 +176,7 @@ def custom_transform(config):
 
     if train_roi_type == "random":
         # standard transforms if you dont have any segs to use
-        print("Using random cropping for training and validation")
+        print("Using random cropping for training")
         train_transform = transforms.Compose([
             transforms.LoadImaged(keys=['image']),
             transforms.EnsureChannelFirstd(keys=["image"]),
@@ -185,6 +188,8 @@ def custom_transform(config):
             transforms.SpatialPadd(keys=['image'], spatial_size=config["training"]["train_patch_shape"], mode='constant'),
             transforms.RandShiftIntensityd(keys=['image'], offsets=0.1, prob=config["training"].get("shift_intensity", 0.0)),
             transforms.RandScaleIntensityd(keys=['image'], factors=0.1, prob=config["training"].get("scale_intensity", 0.0)),
+            # If some dataset items include 'seg', remove it so batches are consistent
+            transforms.DeleteItemsd(keys=['seg']),
             transforms.ToTensord(keys=["image", "label", "event"], dtype=torch.float32, track_meta=False)
         ])
 
@@ -223,7 +228,8 @@ def custom_transform(config):
         raise ValueError(f"Unsupported train_roi_type: {train_roi_type}. Supported types: random, seg_weighted")
     
     val_roi_type = config["data"]["val_roi_type"]
-    if val_roi_type == "random":        
+    if val_roi_type == "center_crop":      
+        print("Using center cropping for validation")  
         val_transform = transforms.Compose([
                 transforms.LoadImaged(keys=['image']),
                 transforms.EnsureChannelFirstd(keys=["image"]),
@@ -231,9 +237,10 @@ def custom_transform(config):
                 transforms.Orientationd(keys=['image'], axcodes=config["data"]["orientation"]),
                 transforms.Spacingd(keys=['image'], pixdim=(1.0, 1.0, 1.0), mode='bilinear'),
                 transforms.CropForegroundd(keys=['image'], source_key='image', margin=1),
-                transforms.RandSpatialCropd(keys=['image'], roi_size=config["training"]["val_patch_shape"], random_size=False),  # Can remove
-                transforms.SpatialPadd(keys=['image'], spatial_size=config["training"]["val_patch_shape"], mode='constant'), # poss remove
-                transforms.ToTensord(keys=["image", "label", "event"], dtype=torch.float32, track_meta=False)
+                transforms.CenterSpatialCropd(keys=['image'], roi_size=config["training"]["val_patch_shape"]), 
+                transforms.SpatialPadd(keys=['image'], spatial_size=config["training"]["val_patch_shape"], mode='constant'), 
+                transforms.DeleteItemsd(keys=['seg']),
+                transforms.ToTensord(keys=["image", "label", "event"], dtype=torch.float32, track_meta=False, allow_missing_keys=False)
             ])
         
     elif val_roi_type == "seg_weighted":
