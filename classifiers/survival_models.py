@@ -1,6 +1,35 @@
+from abc import ABC, abstractmethod
+from typing import Dict, List
 import torch.nn as nn
-from embedders import BaseEmbedder
-class DeepSurvNet(nn.Module):
+from embedders.base_embedders import BaseEmbedder
+
+class BasePredictionModel(nn.Module, ABC):
+    """
+    BasePredictionModel to be used to make sure that prediction models
+      have a function for getting param groups
+      Could also be used down the line for a function like getting embeddings
+      or some kind of feature importance analysis ect...
+
+    """
+    def __init__(self):
+        
+        super().__init__()
+    
+    @abstractmethod
+    def get_param_groups(self) -> Dict[str, List[nn.Parameter]]:
+        """
+        Organizes parameters organized into groups for differential learning rates.
+    
+        includes a dict with param groups, must include at least:
+        - "backbone": encoder/pretrained parameters
+        - "head": task-specific parameters
+        
+        Can also include "pooling": pooling layer parameters (if they are present)
+        """
+        pass
+
+
+class DeepSurvNet(BasePredictionModel):
     def __init__(self, embedder: BaseEmbedder, embedding_dim=512, hidden_dims=[256], 
                  return_embeddings=False):
         super().__init__()
@@ -30,22 +59,9 @@ class DeepSurvNet(nn.Module):
             return out
     
     def get_param_groups(self):
-        backbone_params = list(self.embedder.encoder.parameters()) # embedder should also have a get params
-        head_params = []
+        embedder_groups = self.embedder.get_param_groups()
+    
+        embedder_groups["head"] = list(self.net.parameters())
 
-        for p in self.parameters():
-            if p not in backbone_params:
-                head_params.append(p)
-
-        backbone_params = [p for p in backbone_params if p.requires_grad]
-        head_params = [p for p in head_params if p.requires_grad]
-
-        # Safety: ensure no duplicates
-        assert len(set(backbone_params + head_params)) == \
-            len(backbone_params) + len(head_params), \
-            "Duplicate params"
-
-        return {
-            "backbone": backbone_params,
-            "head": head_params,
-        }
+        return embedder_groups
+    

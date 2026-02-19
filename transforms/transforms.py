@@ -12,7 +12,6 @@ class SmartWeightedCrop(transforms.MapTransform):
         self.spatial_size = spatial_size
         self.seg_key = seg_key
         
-        # Use the 'd' versions - they handle synchronization automatically
         self.weighted_crop = transforms.RandWeightedCropd(
             keys=keys,
             w_key=seg_key,
@@ -58,7 +57,7 @@ class TumorCenterCrop(transforms.MapTransform):
             # Get tumor center of mass
             seg = d[self.seg_key]
 
-            tumor_mask = seg > 0 # assuming 0 is background, can change if you want to center on a specific tumor region
+            tumor_mask = seg > 0 # assuming 0 is background, can change if we want to center on a specific tumor region
             
             if tumor_mask.sum() > 0:
                 if tumor_mask.ndim == 4:
@@ -105,38 +104,85 @@ class TumorCenterCrop(transforms.MapTransform):
         
         return img[tuple(slices)]
     
+def get_normalization_transform(config):
+    """
+    choice of normalization methods
+    BrainSegFounder used NormalizeIntensity (Z-score)
+    BrainMVP used ScaleIntensityRangePercentiles (Percentile)
+    """
+    norm_method = config["data"]["normalization_method"]
 
+    if norm_method == "percentile":
+        return transforms.ScaleIntensityRangePercentilesd(
+            keys=['image'],
+              lower=5, upper=95, b_min=0.0,
+                b_max=1.0, 
+                channel_wise=True)
+    
+    elif norm_method == "z_score":
+        return transforms.NormalizeIntensity(
+            nonzero=True, 
+            channel_wise=True
+            )
+    else:
+        raise ValueError(f"Unsupported normalization method {norm_method}")
+
+def validate_transforms_config(config):
+
+    # check the orientation axcodes
+    valid_orientations = ["RAS", "LPS", "LAS", "RPS", "RAI", "LPI", "LAI", "RPI"]
+    orientation = config["data"].get("orientation", "RAS")
+    if orientation not in valid_orientations:
+        raise ValueError(
+            f"Invalid orientation: {orientation}"
+            f"Must be one of {valid_orientations}"
+        )
+    config["data"]["orientation"] = orientation
+
+    # check the roi types
+    train_roi_type = config["data"].get("train_roi_type", None)
+    if train_roi_type is None:
+        print("No training ROI type provided in the config, falling back to random ROI")
+        config["data"]["train_roi_type"] = "random"
+    
+    val_roi_type = config["data"].get("val_roi_type", None)
+    if val_roi_type is None:
+        print("No validation ROI type provided in the config, falling back to random ROI")
+        config["data"]["val_roi_type"] = "random"
+
+    # check roi sizes
+    train_patch_shape = config["training"].get("train_patch_shape", None)
+    if train_patch_shape is None:
+        print("Train patch shape not provided, defaulting to 96^3")
+        config["training"]["train_patch_shape"] = [96, 96, 96]
+
+    val_patch_shape = config["training"].get("val_patch_shape", None)
+    if val_patch_shape is None:
+        print("No val patch shape provided, falling back to 160^3 (roughly full brain after foreground is cropped)")
+        config["training"]["val_patch_shape"] = [160, 160, 160]
+
+    # norm method checked in function
 
 def custom_transform(config):
     """
     Create custom transforms for training and validation
     """
-    train_roi_type = config["data"].get("train_roi_type", None)
-    if train_roi_type is None:
-        print("No training ROI type provided in the config, falling back to random ROI")
-        train_roi_type = "random"
+    validate_transforms_config(config)
 
-    val_roi_type = config["data"].get("val_roi_type", None)
-    if val_roi_type is None:
-        print("No validation ROI type provided in the config, falling back to random ROI")
-        val_roi_type = "random"
-
-    train_patch_shape = config["training"].get("train_patch_shape", None)
-    if train_patch_shape is None:
-        print("Train patch shape not provided, defaulting to 96^3")
-        train_patch_shape = 96
+    train_roi_type = config["data"]["train_roi_type"]
 
     if train_roi_type == "random":
+        # standard transforms if you dont have any segs to use
         print("Using random cropping for training and validation")
         train_transform = transforms.Compose([
             transforms.LoadImaged(keys=['image']),
             transforms.EnsureChannelFirstd(keys=["image"]),
-            transforms.ScaleIntensityRangePercentilesd(keys=['image'], lower=5, upper=95, b_min=0.0, b_max=1.0, channel_wise=True), #TODO allow selection of various different normalization techniques
-            transforms.Orientationd(keys=['image'], axcodes='RAS'), # TODO allow the selection of different Orientation schemes
+            get_normalization_transform(config),               
+            transforms.Orientationd(keys=['image'], axcodes=config["data"]["orientation"]), # different models have different expected orientations, denoted in the example configs
             transforms.Spacingd(keys=['image'], pixdim=(1.0, 1.0, 1.0), mode='bilinear'),
             transforms.CropForegroundd(keys=['image'], source_key='image'),
-            transforms.RandSpatialCropd(keys=['image'], roi_size=96, random_size=False),  
-            transforms.SpatialPadd(keys=['image'], spatial_size=96, mode='constant'),
+            transforms.RandSpatialCropd(keys=['image'], roi_size=config["training"]["train_patch_shape"], random_size=False),  
+            transforms.SpatialPadd(keys=['image'], spatial_size=config["training"]["train_patch_shape"], mode='constant'),
             transforms.RandShiftIntensityd(keys=['image'], offsets=0.1, prob=config["training"].get("shift_intensity", 0.0)),
             transforms.RandScaleIntensityd(keys=['image'], factors=0.1, prob=config["training"].get("scale_intensity", 0.0)),
             transforms.ToTensord(keys=["image", "label", "event"], dtype=torch.float32, track_meta=False)
@@ -146,30 +192,26 @@ def custom_transform(config):
         train_transform = transforms.Compose([
         transforms.LoadImaged(keys=['image', "seg"], allow_missing_keys=True),
         transforms.EnsureChannelFirstd(keys=["image", "seg"], allow_missing_keys=True),
-        transforms.ScaleIntensityRangePercentilesd(
-            keys=['image'], lower=5, upper=95, 
-            b_min=0.0, b_max=1.0, channel_wise=True
-        ),
-        transforms.Orientationd(keys=['image', "seg"], axcodes='RAS', allow_missing_keys=True),        
+        get_normalization_transform(config),
+        transforms.Orientationd(keys=['image', "seg"], axcodes=config["data"]["orientation"], allow_missing_keys=True),        
         transforms.Spacingd(keys=['image', "seg"], pixdim=(1.0, 1.0, 1.0), mode='bilinear', allow_missing_keys=True),
         transforms.CropForegroundd(keys=['image', "seg"], source_key='image', allow_missing_keys=True),        
-        # not sure if we need to crop foreground if we are doing weighted crop later
-        # comment out if you want non binary weighting
+        # comment out if non binary weighting
         transforms.Lambdad(
             keys=['seg'],
-            func=lambda x: (x > 0).astype(np.float32),  # Any non-zero label becomes 1 
+            func=lambda x: (x > 0).astype(np.float32),  # Any non-zero label becomes 1, we could change if certain tumor regions want more weighting
             allow_missing_keys=True
         ),  
-        SmartWeightedCrop( # handles the case that a patient doesnt have a seg available
+        SmartWeightedCrop( # handles the case that a patient doesnt have a seg available. TODO: should we add the option to enforce segs?
             keys=['image'],
             seg_key='seg',
-            spatial_size=train_patch_shape
+            spatial_size=config["training"]["train_patch_shape"]
         ),
         # Don't need seg anymore, can remove it
         transforms.DeleteItemsd(keys=['seg']),
         transforms.SpatialPadd(
             keys=['image'], 
-            spatial_size=train_patch_shape,
+            spatial_size=config["training"]["train_patch_shape"],
             mode='constant'
         ),
         # optionally add a bit of augmentation
@@ -180,21 +222,17 @@ def custom_transform(config):
     else:
         raise ValueError(f"Unsupported train_roi_type: {train_roi_type}. Supported types: random, seg_weighted")
     
-    val_patch_shape = config["training"].get("val_patch_shape", None)
-    if val_patch_shape is None:
-        print("No val patch shape provided, falling back to 160^3 (roughly full brain after foreground is cropped)")
-        val_patch_shape = [160, 160, 160]
-        
+    val_roi_type = config["data"]["val_roi_type"]
     if val_roi_type == "random":        
         val_transform = transforms.Compose([
                 transforms.LoadImaged(keys=['image']),
                 transforms.EnsureChannelFirstd(keys=["image"]),
-                transforms.ScaleIntensityRangePercentilesd(keys=['image'], lower=5, upper=95, b_min=0.0, b_max=1.0, channel_wise=True),
-                transforms.Orientationd(keys=['image'], axcodes='RAS'),
+                get_normalization_transform(config),
+                transforms.Orientationd(keys=['image'], axcodes=config["data"]["orientation"]),
                 transforms.Spacingd(keys=['image'], pixdim=(1.0, 1.0, 1.0), mode='bilinear'),
                 transforms.CropForegroundd(keys=['image'], source_key='image', margin=1),
-                transforms.RandSpatialCropd(keys=['image'], roi_size=val_patch_shape, random_size=False),  # Can remove
-                transforms.SpatialPadd(keys=['image'], spatial_size=val_patch_shape, mode='constant'), # poss remove
+                transforms.RandSpatialCropd(keys=['image'], roi_size=config["training"]["val_patch_shape"], random_size=False),  # Can remove
+                transforms.SpatialPadd(keys=['image'], spatial_size=config["training"]["val_patch_shape"], mode='constant'), # poss remove
                 transforms.ToTensord(keys=["image", "label", "event"], dtype=torch.float32, track_meta=False)
             ])
         
@@ -202,11 +240,8 @@ def custom_transform(config):
         val_transform = transforms.Compose([
         transforms.LoadImaged(keys=['image', "seg"], allow_missing_keys=True),
         transforms.EnsureChannelFirstd(keys=["image", "seg"], allow_missing_keys=True),
-        transforms.ScaleIntensityRangePercentilesd(
-            keys=['image'], lower=5, upper=95, 
-            b_min=0.0, b_max=1.0, channel_wise=True
-        ),
-        transforms.Orientationd(keys=['image', "seg"], axcodes='RAS', allow_missing_keys=True),        
+        get_normalization_transform(config),
+        transforms.Orientationd(keys=['image', "seg"], axcodes=config["data"]["orientation"], allow_missing_keys=True),        
         transforms.Spacingd(keys=['image', "seg"], pixdim=(1.0, 1.0, 1.0), mode='bilinear', allow_missing_keys=True),
         transforms.CropForegroundd(keys=['image', "seg"], source_key='image', allow_missing_keys=True),        
         # not sure if we need to crop foreground if we are doing weighted crop later
@@ -219,13 +254,13 @@ def custom_transform(config):
         SmartWeightedCrop( # handles the case that a patient doesnt have a seg available
             keys=['image'],
             seg_key='seg',
-            spatial_size=val_patch_shape
+            spatial_size=config["training"]["val_patch_shape"]
         ),
         # Don't need seg anymore, can remove it
         transforms.DeleteItemsd(keys=['seg']),
         transforms.SpatialPadd(
             keys=['image'], 
-            spatial_size=val_patch_shape,
+            spatial_size=config["training"]["val_patch_shape"],
             mode='constant'
         ),
         transforms.ToTensord(keys=["image", "label", "event"], dtype=torch.float32, track_meta=False, allow_missing_keys=False)
@@ -235,35 +270,31 @@ def custom_transform(config):
         val_transform = transforms.Compose([
         transforms.LoadImaged(keys=['image', "seg"], allow_missing_keys=True),
         transforms.EnsureChannelFirstd(keys=["image", "seg"], allow_missing_keys=True),
-        transforms.ScaleIntensityRangePercentilesd(
-            keys=['image'], lower=5, upper=95, 
-            b_min=0.0, b_max=1.0, channel_wise=True
-        ),
-        transforms.Orientationd(keys=['image', "seg"], axcodes='RAS', allow_missing_keys=True),        
+        get_normalization_transform(config),
+        transforms.Orientationd(keys=['image', "seg"], axcodes=config["data"]["orientation"], allow_missing_keys=True),        
         transforms.Spacingd(keys=['image', "seg"], pixdim=(1.0, 1.0, 1.0), mode='bilinear', allow_missing_keys=True),
         transforms.CropForegroundd(keys=['image', "seg"], source_key='image', allow_missing_keys=True),       
         transforms.Lambdad(
             keys=['seg'],
-            func=lambda x: (x > 0).astype(np.float32),  # Any non-zero label becomes 1 
+            func=lambda x: (x > 0).astype(np.float32),
             allow_missing_keys=True
         ),  
-        TumorCenterCrop( # handles the case that a patient doesnt have a seg available
+        TumorCenterCrop(
             keys=['image'],
             seg_key='seg',
-            spatial_size=val_patch_shape
+            spatial_size=config["training"]["val_patch_shape"]
         ),
-        # Don't need seg anymore, can remove it
         transforms.DeleteItemsd(keys=['seg']),
         transforms.SpatialPadd(
             keys=['image'], 
-            spatial_size=val_patch_shape,
+            spatial_size=config["training"]["val_patch_shape"],
             mode='constant'
         ),
         transforms.ToTensord(keys=["image", "label", "event"], dtype=torch.float32, track_meta=False, allow_missing_keys=False)
         ])
 
     else:
-        raise ValueError(f"Unsupported val_roi_type: {train_roi_type}. Supported types: random, seg_weighted, tumor_centered")
+        raise ValueError(f"Unsupported val_roi_type: {val_roi_type}. Supported types: random, seg_weighted, tumor_centered")
         
     return train_transform, val_transform
 

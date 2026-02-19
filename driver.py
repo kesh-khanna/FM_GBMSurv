@@ -575,7 +575,8 @@ def main():
     else:
         logger.info(f"Output directory already exists: {output_dir}")
 
-    save_config(config, os.path.join(output_dir, 'config.yaml'))
+
+    save_config(config, os.path.join(output_dir, 'config.yaml')) #TODO make sure that we are saving the config after all defaults have been added in.
 
     # make our model self
     trainer = ModelTrainer(model, device, config, output_dir)

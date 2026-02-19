@@ -7,11 +7,13 @@ import torch
 import torch.nn as nn
 from typing import Optional
 from embedders.base_embedders import BaseEmbedder
+from abc import ABC, abstractmethod
 
 
-class BrainMVPEmbedder(BaseEmbedder):
+class UniformerEmbedder(BaseEmbedder):
     """
-    Input:  x [B, M, H, W, D]
+    Takes the output of a uniformer and pools it into a fixed length vector for downstream prediction
+    Input:  x [B, 4, H, W, D]
     Output:
       z_patient [B, 512]
     """
@@ -19,13 +21,13 @@ class BrainMVPEmbedder(BaseEmbedder):
         self,
         encoder,
         stage_idx=4,            # which stage of teh model to pull from
-        token_pool="gap",       # "gap" | "gem" | "max"
+        pooling="gap",       # "gap" | "gem" | "max"
         feat_dim=512,
     ):
-        super().__init__(embedding_dim=feat_dim)
+        pooling = FeatureMapPool(kind=pooling)
+        super().__init__(embedding_dim=feat_dim, encoder=encoder, pooling=pooling)
         self.stage_idx = stage_idx
-        self.encoder = encoder
-        self.token_pool = TokenPool(kind=token_pool)
+    
 
     def forward(self, x):
         if x.ndim != 5:
@@ -36,7 +38,7 @@ class BrainMVPEmbedder(BaseEmbedder):
         x_4 = self.encoder(x)[self.stage_idx]  # [B, M, H, W, D] -> [B, C, D', H', W']
 
         # token pool 
-        feats = self.token_pool(x_4)  # -> [B, C]
+        feats = self.pooling(x_4)  # -> [B, C]
 
         return feats
     
@@ -46,10 +48,19 @@ class BrainMVPEmbedder(BaseEmbedder):
             f'stage_{i}': out for i, out in enumerate(outputs)
         }
     
+    def get_param_groups(self):
+        """
+        backbone: Uniformer
+        pooling: any features from the feature map pooling (like gem or future attn based methods)
+        """
+        return super().get_param_groups()
+    
 
-class BrainSegFounderEmbedder(BaseEmbedder):
+class SwinViTEmbedder(BaseEmbedder):
     """
-    Input:  x [B, M, H, W, D]
+    Meant to be connected to the SwinViT encoder
+    Takes the output of swin and pools it into a fixed length vector for downstream prediction
+    Input:  x [B, 4, H, W, D]
     Output:
       z_patient [B, 768]
     """
@@ -57,15 +68,14 @@ class BrainSegFounderEmbedder(BaseEmbedder):
         self,
         encoder,
         stage_idx=4, 
-        token_pool="gap",
+        pooling="gap",
         feat_dim: int =768,
         normalize: bool=True
     ):
-        super().__init__(embedding_dim=feat_dim)
-        self.encoder = encoder
+        pooling = FeatureMapPool(kind=pooling)
+        super().__init__(embedding_dim=feat_dim, encoder=encoder, pooling=pooling)
         self.stage_idx = stage_idx
-        self.token_pool = TokenPool(kind=token_pool)
-        self.normalize = normalize # TODO: this will break if the encoder does not have a normalize arg
+        self.normalize = normalize
     
     def forward(self, x):
         if x.ndim != 5:
@@ -75,8 +85,8 @@ class BrainSegFounderEmbedder(BaseEmbedder):
         
         x_4 = self.encoder(x.contiguous(), normalize=self.normalize)[self.stage_idx]  # [B, M, H, W, D] -> [B, C, D', H', W']
 
-        # token pool 
-        feats = self.token_pool(x_4)  # -> [B, C]
+        # pool featuure map 
+        feats = self.pooling(x_4)  # -> [B, C]
 
         return feats
     
@@ -86,10 +96,34 @@ class BrainSegFounderEmbedder(BaseEmbedder):
             f'stage_{i}': feat for i, feat in enumerate(features)
         }
 
-        
-class TokenPool(nn.Module):
+    def get_param_groups(self):
+        """
+        backbone: SwinViT
+        pooling: any features from the feature map pooling (like gem or future attn based methods)
+        """
+        return super().get_param_groups()
+    
+    
+class BasePooling(nn.Module, ABC):
     """
-    Pools the spatial tokens that are provided by SwinViT and the Uniformer Architectures
+    Abstract class for the pooling operations needed to generate embeddings
+    Takes outputs from a given model and pools them to a fixed length vector
+    """
+    
+    def __init__(self):
+        super().__init__()
+    
+    @abstractmethod
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        input: Tensor, shape dependent on backbone output
+        returns: Tensor of shape [B, C]
+        """
+        pass
+
+class FeatureMapPool(BasePooling):
+    """
+    Pools the spatial feature maps that are provided by SwinViT and the Uniformer Architectures
     [B,C,d',h',w'] -> [B,C]
     """
 
@@ -113,4 +147,4 @@ class TokenPool(nn.Module):
             return x.mean(dim=(2, 3, 4)).pow(1.0 / self.p)
         
         else:
-            raise ValueError(f"Unknown token pool: {self.kind}")
+            raise ValueError(f"Unknown feature pool method: {self.kind}")

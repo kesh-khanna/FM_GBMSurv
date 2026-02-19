@@ -3,9 +3,8 @@ Author: Rakesh Khanna
 """
 
 from backbones.uniformer import UniFormer, set_trainable_uniformer
-from transforms.transforms import SmartWeightedCrop
 from backbones.swin_encoder import SwinTransformer, set_trainable_swin
-from embedders.embedders import BrainMVPEmbedder, BrainSegFounderEmbedder
+from embedders.embedders import UniformerEmbedder, SwinViTEmbedder
 from classifiers.survival_models import DeepSurvNet
 
 from typing import Dict, Any
@@ -16,7 +15,9 @@ import torch
 def create_model(config: Dict[str, Any]) -> nn.Module:
         """
         Create a model based on yaml config.
-        Must have 'model.type' specifying the model type. Supported types: 'brainmvp', 'brainseg'
+        Must have 'model.type' specifying the model type.
+        Currently supported types: 'brainmvp', 'brainseg'
+        Coming Soon: "brainiac"
         """
         model_type = config["model"].get("type", "brainmvp").lower()
 
@@ -80,10 +81,10 @@ def create_model_brainmvp(config):
         train_all_batchnorm=config["model"].get("train_all_batchnorm", True),
     )
 
-    brain_embedder = BrainMVPEmbedder(
+    brain_embedder = UniformerEmbedder(
         encoder=encoder,
         stage_idx=4,
-        token_pool="gap",
+        pooling="gap",
         feat_dim=512,
     )
 
@@ -175,10 +176,10 @@ def create_model_brainseg(config):
             layernorm_only=config["model"].get("layernorm_only", False)
         )
     
-    brain_embedder = BrainSegFounderEmbedder(
+    brain_embedder = SwinViTEmbedder(
         encoder=encoder,
         stage_idx=4,
-        token_pool="gap",
+        pooling="gap",
         feat_dim=feature_size * 16,
     )
 
