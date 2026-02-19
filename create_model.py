@@ -4,7 +4,7 @@ Author: Rakesh Khanna
 
 from backbones.uniformer import UniFormer, set_trainable_uniformer
 from backbones.swin_encoder import SwinTransformer, set_trainable_swin
-from embedders.embedders import UniformerEmbedder, SwinViTEmbedder
+from embedders.feature_extractors import UniformerEmbedder, SwinViTEmbedder
 from classifiers.survival_models import DeepSurvNet
 
 from typing import Dict, Any
@@ -84,7 +84,7 @@ def create_model_brainmvp(config):
     brain_embedder = UniformerEmbedder(
         encoder=encoder,
         stage_idx=4,
-        pooling="gap",
+        pooling=config["model"].get("pooling_method", "gap"),
         feat_dim=512,
     )
 
@@ -179,7 +179,7 @@ def create_model_brainseg(config):
     brain_embedder = SwinViTEmbedder(
         encoder=encoder,
         stage_idx=4,
-        pooling="gap",
+        pooling=config["model"].get("pooling_method", "gap"),
         feat_dim=feature_size * 16,
     )
 

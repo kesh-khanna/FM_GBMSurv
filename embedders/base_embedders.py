@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 import torch
 import torch.nn as nn
 from typing import List, Tuple, Optional
-from embedders import BasePooling
+from embedders.pooling import BasePooling
 
 
 class BaseEmbedder(nn.Module, ABC):
