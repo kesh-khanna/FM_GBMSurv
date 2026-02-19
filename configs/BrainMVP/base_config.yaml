@@ -4,10 +4,13 @@ data:
   val_batch_size: 1
   workers: 8
   train_roi_type: "random" # currenlty support random, seg_weighted
-  val_roi_type: "tumor_centered" # currenlty support center_crop, seg_weighted and tumor centered
+  val_roi_type: "tumor_centered" # currenlty support center_crop and tumor centered
   train_cache_rate: 0.0 
   val_cache_rate: 0.0
-  normalization_method: "percentile" # currently zscore and 5-95 percentile scaling ("percentile") supported
+  normalization_method: "percentile" # currently zscore and 5-95 percentile scaling ("percentile") supported, use percentile for BrainMVP
+  val_patch_shape: [96, 96, 96] # [160, 160, 160] with "center_crop" gave us roughly the full brain tissue, can use smaller if you want to crop on a specific region
+  train_patch_shape: [96, 96, 96]
+
 
 model:
   type: "brainmvp"  
@@ -64,8 +67,6 @@ training:
     # current options include "best_val_c_index" or "last_epoch"
     # if best_val_c_index, then early stopping will be enabled based on the chosen patience
 
-  val_patch_shape: [96, 96, 96] # [160, 160, 160] with "center_crop" gave us roughly the full brain tissue, can use smaller if you want to crop on a specific region
-  train_patch_shape: [96, 96, 96]
 
 output:
   path: "output/path/"

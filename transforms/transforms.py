@@ -154,15 +154,15 @@ def validate_transforms_config(config):
         config["data"]["val_roi_type"] = "random"
 
     # check roi sizes
-    train_patch_shape = config["training"].get("train_patch_shape", None)
+    train_patch_shape = config["data"].get("train_patch_shape", None)
     if train_patch_shape is None:
         print("Train patch shape not provided, defaulting to 96^3")
-        config["training"]["train_patch_shape"] = [96, 96, 96]
+        config["data"]["train_patch_shape"] = [96, 96, 96]
 
-    val_patch_shape = config["training"].get("val_patch_shape", None)
+    val_patch_shape = config["data"].get("val_patch_shape", None)
     if val_patch_shape is None:
         print("No val patch shape provided, falling back to 160^3 (roughly full brain after foreground is cropped)")
-        config["training"]["val_patch_shape"] = [160, 160, 160]
+        config["data"]["val_patch_shape"] = [160, 160, 160]
 
     # norm method checked in function
 
@@ -184,8 +184,8 @@ def custom_transform(config):
             transforms.Orientationd(keys=['image'], axcodes=config["data"]["orientation"]), # different models have different expected orientations, denoted in the example configs
             transforms.Spacingd(keys=['image'], pixdim=(1.0, 1.0, 1.0), mode='bilinear'),
             transforms.CropForegroundd(keys=['image'], source_key='image'),
-            transforms.RandSpatialCropd(keys=['image'], roi_size=config["training"]["train_patch_shape"], random_size=False),  
-            transforms.SpatialPadd(keys=['image'], spatial_size=config["training"]["train_patch_shape"], mode='constant'),
+            transforms.RandSpatialCropd(keys=['image'], roi_size=config["data"]["train_patch_shape"], random_size=False),  
+            transforms.SpatialPadd(keys=['image'], spatial_size=config["data"]["train_patch_shape"], mode='constant'),
             transforms.RandShiftIntensityd(keys=['image'], offsets=0.1, prob=config["training"].get("shift_intensity", 0.0)),
             transforms.RandScaleIntensityd(keys=['image'], factors=0.1, prob=config["training"].get("scale_intensity", 0.0)),
             # If some dataset items include 'seg', remove it so batches are consistent
@@ -210,13 +210,13 @@ def custom_transform(config):
         SmartWeightedCrop( # handles the case that a patient doesnt have a seg available. TODO: should we add the option to enforce segs?
             keys=['image'],
             seg_key='seg',
-            spatial_size=config["training"]["train_patch_shape"]
+            spatial_size=config["data"]["train_patch_shape"]
         ),
         # Don't need seg anymore, can remove it
         transforms.DeleteItemsd(keys=['seg']),
         transforms.SpatialPadd(
             keys=['image'], 
-            spatial_size=config["training"]["train_patch_shape"],
+            spatial_size=config["data"]["train_patch_shape"],
             mode='constant'
         ),
         # optionally add a bit of augmentation
@@ -237,41 +237,13 @@ def custom_transform(config):
                 transforms.Orientationd(keys=['image'], axcodes=config["data"]["orientation"]),
                 transforms.Spacingd(keys=['image'], pixdim=(1.0, 1.0, 1.0), mode='bilinear'),
                 transforms.CropForegroundd(keys=['image'], source_key='image', margin=1),
-                transforms.CenterSpatialCropd(keys=['image'], roi_size=config["training"]["val_patch_shape"]), 
-                transforms.SpatialPadd(keys=['image'], spatial_size=config["training"]["val_patch_shape"], mode='constant'), 
+                transforms.CenterSpatialCropd(keys=['image'], roi_size=config["data"]["val_patch_shape"]), 
+                transforms.SpatialPadd(keys=['image'], spatial_size=config["data"]["val_patch_shape"], mode='constant'), 
                 transforms.DeleteItemsd(keys=['seg']),
                 transforms.ToTensord(keys=["image", "label", "event"], dtype=torch.float32, track_meta=False, allow_missing_keys=False)
             ])
         
-    elif val_roi_type == "seg_weighted":
-        val_transform = transforms.Compose([
-        transforms.LoadImaged(keys=['image', "seg"], allow_missing_keys=True),
-        transforms.EnsureChannelFirstd(keys=["image", "seg"], allow_missing_keys=True),
-        get_normalization_transform(config),
-        transforms.Orientationd(keys=['image', "seg"], axcodes=config["data"]["orientation"], allow_missing_keys=True),        
-        transforms.Spacingd(keys=['image', "seg"], pixdim=(1.0, 1.0, 1.0), mode='bilinear', allow_missing_keys=True),
-        transforms.CropForegroundd(keys=['image', "seg"], source_key='image', allow_missing_keys=True),        
-        # not sure if we need to crop foreground if we are doing weighted crop later
-        # comment out if you want non binary weighting
-        transforms.Lambdad(
-            keys=['seg'],
-            func=lambda x: (x > 0).astype(np.float32),  # Any non-zero label becomes 1 
-            allow_missing_keys=True
-        ),  
-        SmartWeightedCrop( # handles the case that a patient doesnt have a seg available
-            keys=['image'],
-            seg_key='seg',
-            spatial_size=config["training"]["val_patch_shape"]
-        ),
-        # Don't need seg anymore, can remove it
-        transforms.DeleteItemsd(keys=['seg']),
-        transforms.SpatialPadd(
-            keys=['image'], 
-            spatial_size=config["training"]["val_patch_shape"],
-            mode='constant'
-        ),
-        transforms.ToTensord(keys=["image", "label", "event"], dtype=torch.float32, track_meta=False, allow_missing_keys=False)
-        ])
+    # could add seg_weighted to val transformations but not deterministic.
 
     elif val_roi_type == "tumor_centered":
         val_transform = transforms.Compose([
@@ -289,12 +261,12 @@ def custom_transform(config):
         TumorCenterCrop(
             keys=['image'],
             seg_key='seg',
-            spatial_size=config["training"]["val_patch_shape"]
+            spatial_size=config["data"]["val_patch_shape"]
         ),
         transforms.DeleteItemsd(keys=['seg']),
         transforms.SpatialPadd(
             keys=['image'], 
-            spatial_size=config["training"]["val_patch_shape"],
+            spatial_size=config["data"]["val_patch_shape"],
             mode='constant'
         ),
         transforms.ToTensord(keys=["image", "label", "event"], dtype=torch.float32, track_meta=False, allow_missing_keys=False)
