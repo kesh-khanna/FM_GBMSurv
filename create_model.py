@@ -12,7 +12,7 @@ import torch.nn as nn
 import os
 import torch
 
-def create_model(config: Dict[str, Any]) -> nn.Module:
+def create_model(config: Dict[str, Any], predict_only=False) -> nn.Module:
         """
         Create a model based on yaml config.
         Must have 'model.type' specifying the model type.
@@ -22,16 +22,16 @@ def create_model(config: Dict[str, Any]) -> nn.Module:
         model_type = config["model"].get("type", "brainmvp").lower()
 
         if model_type == "brainmvp":
-            return create_model_brainmvp(config)
+            return create_model_brainmvp(config, predict_only)
         elif model_type == "brainseg":
-            return create_model_brainseg(config)
+            return create_model_brainseg(config, predict_only)
         else:
             raise ValueError(
                 f"Unknown model type: {model_type}. "
                 f"Supported types: 'brainmvp', 'brainseg'"
             )
 
-def create_model_brainmvp(config):
+def create_model_brainmvp(config, predict_only):
     """
     create the encoder and wrap the encoder in the embedding model. could change to pass configs individually
     """
@@ -39,7 +39,7 @@ def create_model_brainmvp(config):
     depths = config["model"].get("depths", [3, 4, 8, 3])
     encoder = UniFormer(depth=depths, img_size=config["model"]["img_size"], in_chans=config["model"]["in_chans"], num_classes=1)
 
-    if os.path.exists(config["model"]["pretrained_weights"]) and config["model"].get("use_pretrained_weights", True):
+    if os.path.exists(config["model"]["pretrained_weights"]) and config["model"].get("use_pretrained_weights", True) and not predict_only:
         print(f"Loading pretrained weights from {config['model']['pretrained_weights']}")
         # load in the weights
         weights = torch.load(config["model"]["pretrained_weights"], map_location="cpu")
@@ -66,6 +66,9 @@ def create_model_brainmvp(config):
     elif config["model"].get("use_pretrained_weights", True):
         print(f"Pretrained weights not found at {config['model']['pretrained_weights']}. Training model from scratch.")
 
+    elif predict_only:
+        print("Created model for prediction...")
+        
     else:
         print("Training model from scratch")
     
@@ -104,7 +107,7 @@ def create_model_brainmvp(config):
 
 from monai.utils import ensure_tuple_rep
 
-def create_model_brainseg(config):
+def create_model_brainseg(config, predict_only):
     # some hardcoded values to match the weights, can move to configs if you want to change them
     spatial_dims = 3 
     img_size = ensure_tuple_rep(config["model"]["img_size"], spatial_dims)
@@ -144,7 +147,7 @@ def create_model_brainseg(config):
             use_v2=False,
         )
 
-    if os.path.exists(config["model"]["pretrained_weights"]) and config["model"].get("use_pretrained_weights", True):
+    if os.path.exists(config["model"]["pretrained_weights"]) and config["model"].get("use_pretrained_weights", True) and not predict_only:
         print(f"Loading pretrained weights from {config['model']['pretrained_weights']}")
         checkpoint = torch.load(config["model"]["pretrained_weights"], weights_only=False)
 
@@ -177,6 +180,12 @@ def create_model_brainseg(config):
             train_all_layernorm=config["model"].get("train_all_layernorm", True),
             layernorm_only=config["model"].get("layernorm_only", False)
         )
+    elif predict_only: 
+        print("Created model for prediction...")
+        
+    else:
+        print("Training model from scratch")
+    
     
     brain_embedder = SwinViTEmbedder(
         encoder=encoder,

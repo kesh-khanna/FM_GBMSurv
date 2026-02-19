@@ -31,7 +31,7 @@ import torch.nn as nn
 
 from create_model import create_model
 from transforms.transforms import custom_transform
-from utils.torch_utils import set_seed, clear_memory, set_bn_eval
+from utils.torch_utils import set_seed, set_bn_eval
 
 from utils.utils import check_censoring, load_config, save_config
 from optimizers.create_optimizer import create_optimizer_scheduler
@@ -233,7 +233,6 @@ class ModelTrainer:
 
             with torch.amp.autocast("cuda", enabled=self.config["training"]["mixed_precision"]):
                 log_hz = self.model(images)  
-                # print(log_hz.shape, log_hz.dtype)
 
             # Save detached copies for epoch metrics
             all_log_hz.append(log_hz.detach().cpu())
@@ -251,6 +250,7 @@ class ModelTrainer:
                 )
 
             # skip if no events in this mini-batch. Consider stratified batch sampling if event rate is low
+            # for GBM this is often not an issue
             if events.sum() == 0:
                 if not disable_pbar:
                     tqdm.write(f"Batch {batch_idx+1}: no events, skipping update")
@@ -260,6 +260,32 @@ class ModelTrainer:
             # Backward + step
             self.optimizer.zero_grad(set_to_none=True)
             self.scaler.scale(loss).backward()
+
+            # log gradient norms periodically to track relative learning and monitor any spikes / make sure the gradscaler is working okay
+            if batch_idx % 20 == 0:  # every 20 batches
+                backbone_norm = 0
+                for p in self.optimizer.param_groups[0]['params']:
+                    if p.grad is not None:
+                        backbone_norm += p.grad.data.norm(2).item() ** 2
+                backbone_norm = backbone_norm ** 0.5
+                
+                head_norm = 0 # currnently also includes pooling params
+                for p in self.optimizer.param_groups[1]['params']:
+                    if p.grad is not None:
+                        head_norm += p.grad.data.norm(2).item() ** 2
+                head_norm = head_norm ** 0.5
+                
+                # Total
+                total_norm = (backbone_norm ** 2 + head_norm ** 2) ** 0.5
+                
+                self.writer.add_scalar('gradients/backbone_norm', backbone_norm, self.global_step)
+                self.writer.add_scalar('gradients/head_norm', head_norm, self.global_step)
+                self.writer.add_scalar('gradients/total_norm', total_norm, self.global_step)
+                
+                # ratio for the relative learning
+                if backbone_norm > 0:
+                    self.writer.add_scalar('gradients/head_to_backbone_ratio', head_norm / backbone_norm, self.global_step)
+
             self.scaler.step(self.optimizer)
             self.scaler.update()
 
@@ -282,10 +308,9 @@ class ModelTrainer:
             train_auc = self.training_auc(all_log_hz, all_events, all_time, new_time=new_time)
             train_c = self.training_c(all_log_hz, all_events, all_time)
 
-            del all_log_hz, all_time, all_events
         else:
-            train_auc = 0.0
-            train_c = 0.0
+            train_auc = torch.Tensor(0.0)
+            train_c = torch.Tensor(0.0)
 
         # Log metrics
         self.writer.add_scalar('Loss/Train', avg_loss, self.epoch)
@@ -332,29 +357,24 @@ class ModelTrainer:
             all_events = torch.cat(all_events, dim=0).bool()
             new_time = self.new_time
             
-            # get the loss on the entire validation set
-            # again dont use amp since the loss doesnt accept half precision. Use float 64 instead to be safe
+            # get the loss on the entire validation set 
+            # again dont use amp since our loss doesnt accept half precision. Use float 64 instead to be safe
+            # NOTE: due to the nature of our loss function (nll of the coxph model) the loss on the full validaiton 
+            # set will not be directly comparable to the average per batch loss during training
+            # please keep this in mind when you are looking at the absolute validation loss values compared to training
+            # TODO: explore normalizations that will allow more direct comparisons
             with torch.amp.autocast("cuda", enabled=False):
-                # TODO: right now the loss for the validation set is not directly comparable to the training loss
-                # in the training loss is computed on the effective batch size
-                # here we compute the loss on the full validation set
-                # this is not a problem if the effective batch size is equal to the full batch size
-                # but likely it will not be
-                # might need to scale the validation loss by the effective batch size for plotting and comparison but will test
                 all_log_hz = all_log_hz.double()
                 val_loss = self.loss_module(all_log_hz, event=all_events, time=all_time, reduction="mean").item()
             
             # calculate the metrics
             val_auc = self.val_auc(all_log_hz, all_events, all_time, new_time=new_time)
             val_c = self.val_c(all_log_hz, all_events, all_time)    
-            
-            # empty memory after validation
-            del all_log_hz, all_time, all_events
 
         else:
-            val_loss = float('inf')
-            val_auc = 0.0
-            val_c = 0.0
+            val_loss = torch.Tensor(float('inf'))
+            val_auc = torch.Tensor(0.0)
+            val_c = torch.Tensor(0.0)
         
         # Log metrics
         self.writer.add_scalar('Loss/Validation', val_loss, self.epoch)
@@ -370,18 +390,17 @@ class ModelTrainer:
         Full training loop with validation and early stopping
         Train for max_epochs or until early stopping is triggered (if early stopping is requested in the config)
         """
-        logger.info(f"starting training for {self.max_epochs} epochs")
+        print("-"*80)
+        logger.info(f"Starting training for {self.max_epochs} epochs")
         logger.info(f"Evaluation strategy: {self.evaluation_strategy}")
         logger.info(f"using device: {self.device}")
         logger.info(f"Training batch size: {self.config['data']['batch_size']}")
-        
         if val_loader is not None:
             logger.info(f"Validation batch size: {self.config['data']['val_batch_size']}")
-        
         logger.info(f"Weight Decay: {self.weight_decay}")
         logger.info(f"Encoder LR: {self.backbone_lr}")
         logger.info(f"Heading LR: {self.heading_lr}")
-
+        print("-"*80)
 
         start_time = time.time()
         
@@ -559,7 +578,7 @@ def main():
     test_loader  = DataLoader(test_ds,  batch_size=config["data"]["val_batch_size"], shuffle=False, num_workers=config["data"]["workers"], pin_memory=True, persistent_workers=True) if test_ds else None
     eval_train_dataloader = DataLoader(eval_train_ds, batch_size=config["data"]["val_batch_size"], shuffle=False, num_workers=config["data"]["workers"], pin_memory=True, persistent_workers=True) if eval_train_ds else None
 
-    model = create_model(config)
+    model = create_model(config, args.predict_only)
 
     # Setup output directory
     output_dir = os.path.join(config["output"]["path"], config["output"]["save_name"])
@@ -577,7 +596,10 @@ def main():
 
     if not args.predict_only:
         trainer.train(train_loader, val_loader, disable_pbar=args.disable_progress_bar)
-
+    
+    print("-"*80)
+    logger.info("Starting the final evaluation and saving")
+    print("-"*80)
     eval_checkpoint = trainer.select_checkpoint_for_evaluation(predict_only=args.predict_only, checkpoint_path=config["model"].get("checkpoint_path", None))
     
     # start a small results summary
@@ -594,8 +616,11 @@ def main():
             dataset_name = "Test"
         )
         results_summary["test_results"] = test_results
+        print("-"*80)
     else:
         logger.warning("No test data provided, skipping evaluation on \"test set\"")
+        print("-"*80)
+        test_results, test_preds = None, None
 
     # final test on the train and validation sets
     if eval_train_dataloader:
@@ -607,8 +632,11 @@ def main():
             dataset_name="Training"
         )
         results_summary["train_results"] = train_results
+        print("-"*80)
     else:
         logger.warning("No eval train data provided, skipping evaluation on training set")
+        print("-"*80)
+        train_results, train_preds = None, None
     
     if val_loader:
         logger.info("Evaluating on validation set...")
@@ -619,17 +647,22 @@ def main():
             dataset_name="Validation"
         )
         results_summary["val_results"] = val_results
+        print("-"*80)
     else:
         logger.warning("No validation data provided, skipping evaluation on validation set")
+        print("-"*80)
+
+        val_results, val_preds = None, None
 
     # save the results summary to a JSON file
     with open(os.path.join(output_dir, "results_summary.json"), "w") as f:
         json.dump(results_summary, f, indent=4)
     logger.info(f"Results summary saved to {os.path.join(output_dir, 'results_summary.json')}")
-
+    print("-"*80)
 
     if config["output"].get("prediction_dir", None) is not None:
-        logger.info("Saving predictions...")
+        logger.info("\nSaving predictions...")
+        print("-"*80)
         pred_path = os.path.join(output_dir, config["output"]["prediction_dir"])
         os.makedirs(pred_path, exist_ok=True)
 

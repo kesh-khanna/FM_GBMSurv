@@ -32,7 +32,7 @@ def create_optimizer_scheduler(model: BasePredictionModel, config):
 
     param_groups = [
         {"params": encoder_params, "lr": backbone_lr, "weight_decay": wd},
-        {"params": head_params, "lr": head_lr, "weight_decay": wd},
+        {"params": all_head_params, "lr": head_lr, "weight_decay": wd},
     ]
 
     # Optimizer
