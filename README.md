@@ -28,6 +28,39 @@ cd gbm-survival
 # Install dependencies
 pip install -r requirements.txt
 ```
+## Data Format
+
+The framework expects a JSON file containing train/validation/test splits with the following structure:
+
+```json
+{
+  "train": [
+      {
+        "patient_id": "PATIENT_001",
+        "image": [
+          "/path/to/data/PATIENT_001/PATIENT_001_T1.nii",
+          "/path/to/data/PATIENT_001/PATIENT_001_FLAIR.nii",
+          "/path/to/data/PATIENT_001/PATIENT_001_T1GD.nii",
+          "/path/to/data/PATIENT_001/PATIENT_001_T2.nii"
+        ],
+        "label": 1039.0,
+        "event": 1,
+        "seg": "/path/to/data/PATIENT_001/PATIENT_001_segmentation.nii"
+      },
+    ...
+    ],
+    "validation": [...],
+    "test": [...]
+    
+}
+```
+
+**Field Descriptions:**
+- **`patient_id`**: Unique patient identifier
+- **`image`**: Array of 4 MRI sequences ordered [T1, FLAIR, T1GD, T2]
+- **`label`**: Survival time in days
+- **`event`**: Event indicator (1 = death/event occurred, 0 = censored)
+- **`seg`**: Path to tumor segmentation mask (for any tumor aware roi methods)
 
 ## Pre-trained Weights
 + linked below or on original model GitHubs
