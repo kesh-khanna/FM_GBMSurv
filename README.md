@@ -34,6 +34,7 @@ pip install -r requirements.txt
 
 Download the pre-trained weights for your chosen backbone:
 **BrainMVP**: [BrainMVP Uniformer](https://drive.google.com/file/d/1DTmz5WACESD0wfkZ2r0x-zjTwOgd9ov3/view)
+
 **BrainSegFounder**: [Google Drive](https://drive.google.com/drive/folders/1fl3FeMEhv_cnIwrDa5geHPbKL-tHAuQE)
 + For Glioma specific pretraining, download weights from /BraTS/ssl
 + Choose any one of the available folds
@@ -49,27 +50,24 @@ We attempted to make the configurations matching, but some parameters are model 
 ### Key Configuration Parameters
 
 **Data Parameters:**
-+ `batch_size`: Training batch size (recommended: 16 for better Cox loss estimates)
++ `batch_size`: Training batch size 
 + `train_roi_type`: ROI sampling strategy during training (`random`, `seg_weighted`)
 + `val_roi_type`: ROI sampling for validation (`center_crop`, `seg_weighted`)
 + `normalization_method`: Normalization approach (`z_score` or `percentile` for 5-95 percentile scaling)
-+ `train_cache_rate`/`val_cache_rate`: MONAI cache rate (0.0-1.0) for faster data loading
-+ `train_patch_shape` and `val_patch_shape`: determine the size of ROIs
++ `train_cache_rate`/`val_cache_rate`: MONAI cache rate (0.0-1.0) for caching of non-random transforms
++ `train_patch_shape` and `val_patch_shape`: Determines the size of ROIs
 
 **Model Parameters:**
 + `type`: Model architecture (`brainmvp` or `brainseg`)
 + `pretrained_weights`: Path to pretrained backbone weights
++ `use_pretrained_weights`: Whether or not to load the provided pretraining weights
 + `checkpoint_path`: Path to checkpoint for prediction-only mode
 + Fine-tuning controls: `train_patch_embed`, `train_stage1`, etc. control which layers are trainable
-+ `drop_rate`: dropout rate throughout model backbone and MLP head.
-+ `checkpoint_path`: model checkpoint override for prediction-only usage
 
 **Training Parameters:**
 + `backbone_lr`/`head_lr`: Separate learning rates for backbone and prediction head
 + `evaluation_strategy`: `last_epoch` or `best_val_cindex` (enables early stopping)
-+ `patience`: Early stopping patience (only used with `best_val_cindex`)
 + `new_time`: Time horizon in days for AUC calculation (e.g., 365.0 for 1-year survival)
-+ `save_top_k`: Number of best checkpoints to keep
 
 ## Usage
 
@@ -92,7 +90,7 @@ Run inference on test data using a given checkpoint:
 python driver.py --config_file configs/brainmvp_config.yaml --predict_only
 ```
 
-When using `--predict_only`, make sure your config file includes the checkpoint path:
+When using `--predict_only`, make sure your config file includes the desired checkpoint path:
 
 ```yaml
 model:
@@ -172,7 +170,7 @@ The framework supports flexible fine-tuning approaches:
 All layers are trainable (default, or when layer-specific controls are set to `True`)
 
 ### Partial Fine-tuning
-Freeze early layers, train later ones:
+i.e. Freeze early layers, train later ones:
 ```yaml
 # brainsegfounder specific layer names
 model:
@@ -186,16 +184,16 @@ model:
 ## ROI Sampling Strategies
 
 ### Training
-- **`random`**: Random crop from the entire volume
+- **`random`**: Random crop from the foreground cropped volume
 - **`seg_weighted`**: Weighted sampling based on tumor segmentation mask
 
 ### Validation/Testing
-+ **`center_crop`**: Center crop of specified size
++ **`center_crop`**: Center crop of specified size from foreground cropped volume
 + **`tumor_centered`**: Crop centered on tumor centroid
 
 ## A Few Tips and Best Practices
 
-1. **Batch Size**: Larger batches provide better within-batch risk estimations. This is especially the case when the event-rate is lower.
+1. **Batch Size**: Larger batches provide better within-batch risk estimations. This is especially the case when the event-rate is low.
 
 2. **Learning Rates**: 
    + If fully finetuning, finetune backbone lightly.
@@ -212,8 +210,8 @@ model:
 ## License
 + to be added
 
-## Additional Acknowledgements and Thank Yous
-+ BrainSegFounder
-+ BrainMVP
-+ MONAI Framework
-+ TorchSurv Library
+## Additional Acknowledgements and Thanks To:
++ BrainSegFounder Team
++ BrainMVP Team
++ MONAI Framework Team
++ TorchSurv Library Team
