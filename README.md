@@ -5,9 +5,9 @@ A deep learning framework for performing survival prediction in GBM using multim
 ## Overview 
 This repo implements end-to-end survival prediction using structural MRI scans (T1,T2-FLAIR,T1GD,T2). The framework currently supports two pretrained backbone architectures:
 
-+ **BrainSegFounder[Paper](https://www.sciencedirect.com/science/article/pii/S1361841524002263)[GitHub](https://github.com/lab-smile/BrainSegFounder)**: The BrainSegFounder is a multi-modal 3D MRI foundation model, built with a SwinVit encoder. This model was pretrained on unlabeled volumes from healthy participants at the UK Biobank and unlabeled volumes from patients with gliomas in the [BraTS challenge dataset](https://www.cancerimagingarchive.net/analysis-result/rsna-asnr-miccai-brats-2021/)
++ **BrainSegFounder [(Paper)](https://www.sciencedirect.com/science/article/pii/S1361841524002263) [(GitHub)](https://github.com/lab-smile/BrainSegFounder)**: The BrainSegFounder is a multi-modal 3D MRI foundation model, built with a SwinVit encoder. This model was pretrained on unlabeled volumes from healthy participants at the UK Biobank and unlabeled volumes from patients with gliomas in the [BraTS challenge dataset](https://www.cancerimagingarchive.net/analysis-result/rsna-asnr-miccai-brats-2021/)
 
-+ **BrainMVP[Paper](https://arxiv.org/abs/2410.10604)[GitHub](https://github.com/shaohao011/BrainMVP)**: The BrainMVP is a brain-focused foundation model based on the Uniformer architecture that utilizes a multi-modal contrastive learning framework across 16,022 brain MRI scans from multiple different datasets and disease types.
++ **BrainMVP [(Paper)](https://arxiv.org/abs/2410.10604) [(GitHub)](https://github.com/shaohao011/BrainMVP)**: The BrainMVP is a brain-focused foundation model based on the Uniformer architecture that utilizes a multi-modal contrastive learning framework across 16,022 brain MRI scans from multiple different datasets and disease types.
 
 ## Features
 
@@ -24,6 +24,10 @@ This repo implements end-to-end survival prediction using structural MRI scans (
 # Clone the repo
 git clone https://github.com/kesh-khanna/FM_GBMSurv.git
 cd gbm-survival
+
+# we recommend a conda env or poetry
+conda create -n "gbmsurv" python=3.12
+conda activate gbmsurv
 
 # Install dependencies
 pip install -r requirements.txt

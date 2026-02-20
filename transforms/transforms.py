@@ -1,8 +1,15 @@
-import monai.transforms as transforms
+from monai.transforms.transform import MapTransform
+from monai.transforms.croppad.dictionary import RandWeightedCropd, CropForegroundd, RandSpatialCropd, SpatialPadd, CenterSpatialCropd
+from monai.transforms.intensity.dictionary import ScaleIntensityRangePercentilesd, NormalizeIntensityd
+from monai.transforms.compose import Compose
+from monai.transforms.io.dictionary import LoadImaged
+from monai.transforms.utility.dictionary import EnsureChannelFirstd, DeleteItemsd, ToTensord, Lambdad
+from monai.transforms.spatial.dictionary import Orientationd, Spacingd
+from monai.transforms.intensity.dictionary import RandShiftIntensityd, RandScaleIntensityd
 import numpy as np 
 import torch
 
-class SmartWeightedCrop(transforms.MapTransform):
+class SmartWeightedCrop(MapTransform):
     """
     Weighted crop if seg exists, otherwise random crop.
     Uses dictionary transforms to ensure same crop applied to all keys.
@@ -12,13 +19,13 @@ class SmartWeightedCrop(transforms.MapTransform):
         self.spatial_size = spatial_size
         self.seg_key = seg_key
         
-        self.weighted_crop = transforms.RandWeightedCropd(
+        self.weighted_crop = RandWeightedCropd(
             keys=keys,
             w_key=seg_key,
             spatial_size=spatial_size,
             num_samples=1,
         )
-        self.random_crop = transforms.RandSpatialCropd(
+        self.random_crop = RandSpatialCropd(
             keys=keys, 
             roi_size=spatial_size,
             random_size=False,
@@ -37,7 +44,7 @@ class SmartWeightedCrop(transforms.MapTransform):
         
         return d
 
-class TumorCenterCrop(transforms.MapTransform):
+class TumorCenterCrop(MapTransform):
     """
     Deterministic crop centered on tumor center of mass.
     Falls back to img center if no seg available.
@@ -115,14 +122,14 @@ def get_normalization_transform(config):
     norm_method = config["data"]["normalization_method"]
 
     if norm_method == "percentile":
-        return transforms.ScaleIntensityRangePercentilesd(
+        return ScaleIntensityRangePercentilesd(
             keys=['image'],
               lower=5, upper=95, b_min=0.0,
                 b_max=1.0, 
                 channel_wise=True)
     
     elif norm_method == "z_score":
-        return transforms.NormalizeIntensityd(
+        return NormalizeIntensityd(
             keys=["image"],
             nonzero=True, 
             channel_wise=True
@@ -161,7 +168,7 @@ def validate_transforms_config(config):
 
     val_patch_shape = config["data"].get("val_patch_shape", None)
     if val_patch_shape is None:
-        print("No val patch shape provided, falling back to 160^3 (roughly full brain after foreground is cropped)")
+        print("No val patch shape provided, falling back to 160^3")
         config["data"]["val_patch_shape"] = [160, 160, 160]
 
     # norm method checked in function
@@ -177,32 +184,32 @@ def custom_transform(config):
     if train_roi_type == "random":
         # standard transforms if you dont have any segs to use
         print("Using random cropping for training")
-        train_transform = transforms.Compose([
-            transforms.LoadImaged(keys=['image']),
-            transforms.EnsureChannelFirstd(keys=["image"]),
+        train_transform = Compose([
+            LoadImaged(keys=['image']),
+            EnsureChannelFirstd(keys=["image"]),
             get_normalization_transform(config),               
-            transforms.Orientationd(keys=['image'], axcodes=config["data"]["orientation"]), # different models have different expected orientations, denoted in the example configs
-            transforms.Spacingd(keys=['image'], pixdim=(1.0, 1.0, 1.0), mode='bilinear'),
-            transforms.CropForegroundd(keys=['image'], source_key='image'),
-            transforms.RandSpatialCropd(keys=['image'], roi_size=config["data"]["train_patch_shape"], random_size=False),  
-            transforms.SpatialPadd(keys=['image'], spatial_size=config["data"]["train_patch_shape"], mode='constant'),
-            transforms.RandShiftIntensityd(keys=['image'], offsets=0.1, prob=config["training"].get("shift_intensity", 0.0)),
-            transforms.RandScaleIntensityd(keys=['image'], factors=0.1, prob=config["training"].get("scale_intensity", 0.0)),
+            Orientationd(keys=['image'], axcodes=config["data"]["orientation"], labels=None), # different models have different expected orientations, denoted in the example configs
+            Spacingd(keys=['image'], pixdim=(1.0, 1.0, 1.0), mode='bilinear'),
+            CropForegroundd(keys=['image'], source_key='image'),
+            RandSpatialCropd(keys=['image'], roi_size=config["data"]["train_patch_shape"], random_size=False),  
+            SpatialPadd(keys=['image'], spatial_size=config["data"]["train_patch_shape"], mode='constant'),
+            RandShiftIntensityd(keys=['image'], offsets=0.1, prob=config["training"].get("shift_intensity", 0.0)),
+            RandScaleIntensityd(keys=['image'], factors=0.1, prob=config["training"].get("scale_intensity", 0.0)),
             # If some dataset items include 'seg', remove it so batches are consistent
-            transforms.DeleteItemsd(keys=['seg']),
-            transforms.ToTensord(keys=["image", "label", "event"], dtype=torch.float32, track_meta=False)
+            DeleteItemsd(keys=['seg']),
+            ToTensord(keys=["image", "label", "event"], dtype=torch.float32, track_meta=False)
         ])
 
     elif train_roi_type == "seg_weighted":
-        train_transform = transforms.Compose([
-        transforms.LoadImaged(keys=['image', "seg"], allow_missing_keys=True),
-        transforms.EnsureChannelFirstd(keys=["image", "seg"], allow_missing_keys=True),
+        train_transform = Compose([
+        LoadImaged(keys=['image', "seg"], allow_missing_keys=True),
+        EnsureChannelFirstd(keys=["image", "seg"], allow_missing_keys=True),
         get_normalization_transform(config),
-        transforms.Orientationd(keys=['image', "seg"], axcodes=config["data"]["orientation"], allow_missing_keys=True),        
-        transforms.Spacingd(keys=['image', "seg"], pixdim=(1.0, 1.0, 1.0), mode='bilinear', allow_missing_keys=True),
-        transforms.CropForegroundd(keys=['image', "seg"], source_key='image', allow_missing_keys=True),        
+        Orientationd(keys=['image', "seg"], axcodes=config["data"]["orientation"], allow_missing_keys=True, labels=None),        
+        Spacingd(keys=['image', "seg"], pixdim=(1.0, 1.0, 1.0), mode='bilinear', allow_missing_keys=True),
+        CropForegroundd(keys=['image', "seg"], source_key='image', allow_missing_keys=True),        
         # comment out if non binary weighting
-        transforms.Lambdad(
+        Lambdad(
             keys=['seg'],
             func=lambda x: (x > 0).astype(np.float32),  # Any non-zero label becomes 1, we could change if certain tumor regions want more weighting
             allow_missing_keys=True
@@ -213,16 +220,16 @@ def custom_transform(config):
             spatial_size=config["data"]["train_patch_shape"]
         ),
         # Don't need seg anymore, can remove it
-        transforms.DeleteItemsd(keys=['seg']),
-        transforms.SpatialPadd(
+        DeleteItemsd(keys=['seg']),
+        SpatialPadd(
             keys=['image'], 
             spatial_size=config["data"]["train_patch_shape"],
             mode='constant'
         ),
         # optionally add a bit of augmentation
-        transforms.RandShiftIntensityd(keys=['image'], offsets=0.1, prob=config["training"].get("shift_intensity", 0.0)),
-        transforms.RandScaleIntensityd(keys=['image'], factors=0.1, prob=config["training"].get("scale_intensity", 0.0)),
-        transforms.ToTensord(keys=["image", "label", "event"], dtype=torch.float32, track_meta=False, allow_missing_keys=False)
+        RandShiftIntensityd(keys=['image'], offsets=0.1, prob=config["training"].get("shift_intensity", 0.0)),
+        RandScaleIntensityd(keys=['image'], factors=0.1, prob=config["training"].get("scale_intensity", 0.0)),
+        ToTensord(keys=["image", "label", "event"], dtype=torch.float32, track_meta=False, allow_missing_keys=False)
     ])
     else:
         raise ValueError(f"Unsupported train_roi_type: {train_roi_type}. Supported types: random, seg_weighted")
@@ -230,30 +237,30 @@ def custom_transform(config):
     val_roi_type = config["data"]["val_roi_type"]
     if val_roi_type == "center_crop":      
         print("Using center cropping for validation")  
-        val_transform = transforms.Compose([
-                transforms.LoadImaged(keys=['image']),
-                transforms.EnsureChannelFirstd(keys=["image"]),
+        val_transform = Compose([
+                LoadImaged(keys=['image']),
+                EnsureChannelFirstd(keys=["image"]),
                 get_normalization_transform(config),
-                transforms.Orientationd(keys=['image'], axcodes=config["data"]["orientation"]),
-                transforms.Spacingd(keys=['image'], pixdim=(1.0, 1.0, 1.0), mode='bilinear'),
-                transforms.CropForegroundd(keys=['image'], source_key='image', margin=1),
-                transforms.CenterSpatialCropd(keys=['image'], roi_size=config["data"]["val_patch_shape"]), 
-                transforms.SpatialPadd(keys=['image'], spatial_size=config["data"]["val_patch_shape"], mode='constant'), 
-                transforms.DeleteItemsd(keys=['seg']),
-                transforms.ToTensord(keys=["image", "label", "event"], dtype=torch.float32, track_meta=False, allow_missing_keys=False)
+                Orientationd(keys=['image'], axcodes=config["data"]["orientation"], labels=None),
+                Spacingd(keys=['image'], pixdim=(1.0, 1.0, 1.0), mode='bilinear'),
+                CropForegroundd(keys=['image'], source_key='image', margin=1),
+                CenterSpatialCropd(keys=['image'], roi_size=config["data"]["val_patch_shape"]), 
+                SpatialPadd(keys=['image'], spatial_size=config["data"]["val_patch_shape"], mode='constant'), 
+                DeleteItemsd(keys=['seg']),
+                ToTensord(keys=["image", "label", "event"], dtype=torch.float32, track_meta=False, allow_missing_keys=False)
             ])
         
     # could add seg_weighted to val transformations but not deterministic.
 
     elif val_roi_type == "tumor_centered":
-        val_transform = transforms.Compose([
-        transforms.LoadImaged(keys=['image', "seg"], allow_missing_keys=True),
-        transforms.EnsureChannelFirstd(keys=["image", "seg"], allow_missing_keys=True),
+        val_transform = Compose([
+        LoadImaged(keys=['image', "seg"], allow_missing_keys=True),
+        EnsureChannelFirstd(keys=["image", "seg"], allow_missing_keys=True),
         get_normalization_transform(config),
-        transforms.Orientationd(keys=['image', "seg"], axcodes=config["data"]["orientation"], allow_missing_keys=True),        
-        transforms.Spacingd(keys=['image', "seg"], pixdim=(1.0, 1.0, 1.0), mode='bilinear', allow_missing_keys=True),
-        transforms.CropForegroundd(keys=['image', "seg"], source_key='image', allow_missing_keys=True),       
-        transforms.Lambdad(
+        Orientationd(keys=['image', "seg"], axcodes=config["data"]["orientation"], allow_missing_keys=True, labels=None),        
+        Spacingd(keys=['image', "seg"], pixdim=(1.0, 1.0, 1.0), mode='bilinear', allow_missing_keys=True),
+        CropForegroundd(keys=['image', "seg"], source_key='image', allow_missing_keys=True),       
+        Lambdad(
             keys=['seg'],
             func=lambda x: (x > 0).astype(np.float32),
             allow_missing_keys=True
@@ -263,17 +270,17 @@ def custom_transform(config):
             seg_key='seg',
             spatial_size=config["data"]["val_patch_shape"]
         ),
-        transforms.DeleteItemsd(keys=['seg']),
-        transforms.SpatialPadd(
+        DeleteItemsd(keys=['seg']),
+        SpatialPadd(
             keys=['image'], 
             spatial_size=config["data"]["val_patch_shape"],
             mode='constant'
         ),
-        transforms.ToTensord(keys=["image", "label", "event"], dtype=torch.float32, track_meta=False, allow_missing_keys=False)
+        ToTensord(keys=["image", "label", "event"], dtype=torch.float32, track_meta=False, allow_missing_keys=False)
         ])
 
     else:
-        raise ValueError(f"Unsupported val_roi_type: {val_roi_type}. Supported types: random, seg_weighted, tumor_centered")
+        raise ValueError(f"Unsupported val_roi_type: {val_roi_type}. Supported types: center_crop, tumor_centered")
         
     return train_transform, val_transform
 

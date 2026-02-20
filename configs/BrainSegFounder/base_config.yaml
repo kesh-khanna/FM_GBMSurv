@@ -3,7 +3,7 @@ data:
   batch_size: 16 # nll estimate based on within batch comparisons, ideally > 8 for better estimates of risk
   val_batch_size: 1
   workers: 8
-  train_roi_type: "random" # currenlty support random, seg_weighted
+  train_roi_type: "seg_weighted" # currenlty support random, seg_weighted
   val_roi_type: "tumor_centered" # currenlty support center_crop, seg_weighted and tumor centered
   train_cache_rate: 0.0 
   val_cache_rate: 0.0

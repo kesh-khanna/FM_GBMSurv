@@ -40,6 +40,7 @@ def create_model_brainmvp(config, predict_only):
     encoder = UniFormer(depth=depths, img_size=config["model"]["img_size"], in_chans=config["model"]["in_chans"], num_classes=1)
 
     if os.path.exists(config["model"]["pretrained_weights"]) and config["model"].get("use_pretrained_weights", True) and not predict_only:
+        print("\n", "-"*80)
         print(f"Loading pretrained weights from {config['model']['pretrained_weights']}")
         # load in the weights
         weights = torch.load(config["model"]["pretrained_weights"], map_location="cpu")
@@ -99,10 +100,6 @@ def create_model_brainmvp(config, predict_only):
         hidden_dims=config["model"].get("hidden_dims", [256]),
         return_embeddings=config["model"].get("return_embeddings", False)
     )
-
-    trainable = [(n, p.numel()) for n,p in model.named_parameters() if p.requires_grad]
-    print("Trainable params:", sum(x[1] for x in trainable))
-    print("\n".join([n for n,_ in trainable[:50]]), "...")
     return model
 
 from monai.utils import ensure_tuple_rep
@@ -201,7 +198,4 @@ def create_model_brainseg(config, predict_only):
         return_embeddings=config["model"].get("return_embeddings", False)
     )
 
-    trainable = [(n, p.numel()) for n,p in model.named_parameters() if p.requires_grad]
-    print("Trainable params:", sum(x[1] for x in trainable))
-    print("\n".join([n for n,_ in trainable[:50]]), "...")
     return model

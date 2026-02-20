@@ -21,13 +21,7 @@ import json
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-import sys
-print(sys.executable)
-import monai
-print(monai.__version__)
 import torch
-print(torch.__version__)
-import torch.nn as nn
 
 from create_model import create_model
 from transforms.transforms import custom_transform
@@ -44,7 +38,7 @@ class ModelTrainer:
         self.output_dir = output_dir
         
         self.max_epochs = config["training"]["max_epochs"]
-        self.heading_lr = config["training"]["head_lr"]
+        self.head_lr = config["training"]["head_lr"]
         self.backbone_lr = config["training"]["backbone_lr"]
         self.weight_decay = config["training"]["reg_weight"]
         
@@ -164,7 +158,7 @@ class ModelTrainer:
         if "round" in checkpoint:
             logger.info(f"Round loaded from checkpoint: {checkpoint['round']}")
 
-        self.score = checkpoint['best_score']
+        self.score = checkpoint['score']
         self.global_step = checkpoint['global_step']
         self.epoch = checkpoint['epoch']
         
@@ -203,7 +197,7 @@ class ModelTrainer:
             logger.warning("No checkpoints found, using current model state")
             eval_checkpoint = None
 
-        logger.info(f"Selected {eval_checkpoint} as our checkpoint to be used for evaluation")
+        # logger.info(f"Selected {eval_checkpoint} as our checkpoint to be used for evaluation")
     
         return eval_checkpoint
     
@@ -292,9 +286,6 @@ class ModelTrainer:
             total_loss += loss.item()
             num_loss_computations += 1
             self.global_step += 1
-
-            if not disable_pbar:
-                tqdm.write(f"Epoch {self.epoch}, Batch {batch_idx+1}, Loss: {loss.item():.4f}")
 
         avg_loss = total_loss / num_loss_computations if num_loss_computations > 0 else float('inf')
 
@@ -390,7 +381,7 @@ class ModelTrainer:
         Full training loop with validation and early stopping
         Train for max_epochs or until early stopping is triggered (if early stopping is requested in the config)
         """
-        print("-"*80)
+        print("\n", "-"*80)
         logger.info(f"Starting training for {self.max_epochs} epochs")
         logger.info(f"Evaluation strategy: {self.evaluation_strategy}")
         logger.info(f"using device: {self.device}")
@@ -399,8 +390,8 @@ class ModelTrainer:
             logger.info(f"Validation batch size: {self.config['data']['val_batch_size']}")
         logger.info(f"Weight Decay: {self.weight_decay}")
         logger.info(f"Encoder LR: {self.backbone_lr}")
-        logger.info(f"Heading LR: {self.heading_lr}")
-        print("-"*80)
+        logger.info(f"Head LR: {self.head_lr}")
+        print("-"*80, '\n')
 
         start_time = time.time()
         
@@ -538,8 +529,8 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     set_track_meta(True)
     
-    logger.info(f"using device: {device}")
     logger.info(f"config loaded from: {args.config_file}")
+    print("-"*80, "\n")
 
     # load in the json file
     with open(config["data"]["json_file"], "r") as f:
@@ -597,9 +588,9 @@ def main():
     if not args.predict_only:
         trainer.train(train_loader, val_loader, disable_pbar=args.disable_progress_bar)
     
-    print("-"*80)
+    print("\n", "-"*80)
     logger.info("Starting the final evaluation and saving")
-    print("-"*80)
+    print("-"*80, "\n")
     eval_checkpoint = trainer.select_checkpoint_for_evaluation(predict_only=args.predict_only, checkpoint_path=config["model"].get("checkpoint_path", None))
     
     # start a small results summary
@@ -616,10 +607,10 @@ def main():
             dataset_name = "Test"
         )
         results_summary["test_results"] = test_results
-        print("-"*80)
+        print("-"*80, "\n")
     else:
         logger.warning("No test data provided, skipping evaluation on \"test set\"")
-        print("-"*80)
+        print("-"*80, "\n")
         test_results, test_preds = None, None
 
     # final test on the train and validation sets
@@ -632,10 +623,10 @@ def main():
             dataset_name="Training"
         )
         results_summary["train_results"] = train_results
-        print("-"*80)
+        print("-"*80, "\n")
     else:
         logger.warning("No eval train data provided, skipping evaluation on training set")
-        print("-"*80)
+        print("-"*80, "\n")
         train_results, train_preds = None, None
     
     if val_loader:
@@ -647,10 +638,10 @@ def main():
             dataset_name="Validation"
         )
         results_summary["val_results"] = val_results
-        print("-"*80)
+        print("-"*80, "\n")
     else:
         logger.warning("No validation data provided, skipping evaluation on validation set")
-        print("-"*80)
+        print("-"*80, "\n")
 
         val_results, val_preds = None, None
 
@@ -658,11 +649,10 @@ def main():
     with open(os.path.join(output_dir, "results_summary.json"), "w") as f:
         json.dump(results_summary, f, indent=4)
     logger.info(f"Results summary saved to {os.path.join(output_dir, 'results_summary.json')}")
-    print("-"*80)
+    print("-"*80, "\n")
 
     if config["output"].get("prediction_dir", None) is not None:
-        logger.info("\nSaving predictions...")
-        print("-"*80)
+        logger.info("Saving predictions...")
         pred_path = os.path.join(output_dir, config["output"]["prediction_dir"])
         os.makedirs(pred_path, exist_ok=True)
 
