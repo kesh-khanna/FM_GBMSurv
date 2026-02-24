@@ -63,8 +63,8 @@ training:
   scale_intensity: 0.3
 
   evaluation_strategy: "last_epoch"
-    # current options include "best_val_c_index" or "last_epoch"
-    # if best_val_c_index, then early stopping will be enabled based on the chosen patience
+    # current options include "best_val_cindex" or "last_epoch"
+    # if best_val_cindex, then early stopping will be enabled based on the chosen patience
 
 
 
