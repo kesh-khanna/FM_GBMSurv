@@ -38,7 +38,9 @@ class SmartWeightedCrop(MapTransform):
         has_seg = self.seg_key in d and d[self.seg_key] is not None
         
         if has_seg:
-            d = self.weighted_crop(d)
+            result = self.weighted_crop(d)
+            print(len(result))
+            d = result[0] if isinstance(result, list) else result # making the dict into a list for some reason
         else:
             d = self.random_crop(d)
         
