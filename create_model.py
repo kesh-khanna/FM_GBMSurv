@@ -39,7 +39,7 @@ def create_model_brainmvp(config, predict_only):
     depths = config["model"].get("depths", [3, 4, 8, 3])
     encoder = UniFormer(depth=depths, img_size=config["model"]["img_size"], in_chans=config["model"]["in_chans"], num_classes=1)
 
-    if os.path.exists(config["model"]["pretrained_weights"]) and config["model"].get("use_pretrained_weights", True) and not predict_only:
+    if os.path.exists(config["model"]["pretrained_weights"]) and config["model"].get("use_pretrained_weights", False) and not predict_only:
         print("\n", "-"*80)
         print(f"Loading pretrained weights from {config['model']['pretrained_weights']}")
         # load in the weights
@@ -64,12 +64,9 @@ def create_model_brainmvp(config, predict_only):
         print(f"Length of Missing Keys: {len(out.missing_keys)}")
         print(f"Length of Unexpected Keys: {len(out.unexpected_keys)}")
 
-    elif config["model"].get("use_pretrained_weights", True):
-        print(f"Pretrained weights not found at {config['model']['pretrained_weights']}. Training model from scratch.")
-
     elif predict_only:
         print("Created model for prediction...")
-        
+
     else:
         print("Training model from scratch")
     
@@ -144,7 +141,7 @@ def create_model_brainseg(config, predict_only):
             use_v2=False,
         )
 
-    if os.path.exists(config["model"]["pretrained_weights"]) and config["model"].get("use_pretrained_weights", True) and not predict_only:
+    if os.path.exists(config["model"]["pretrained_weights"]) and config["model"].get("use_pretrained_weights", False) and not predict_only:
         print(f"Loading pretrained weights from {config['model']['pretrained_weights']}")
         checkpoint = torch.load(config["model"]["pretrained_weights"], weights_only=False)
 

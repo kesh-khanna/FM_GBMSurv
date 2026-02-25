@@ -39,7 +39,6 @@ class SmartWeightedCrop(MapTransform):
         
         if has_seg:
             result = self.weighted_crop(d)
-            print(len(result))
             d = result[0] if isinstance(result, list) else result # making the dict into a list for some reason
         else:
             d = self.random_crop(d)
