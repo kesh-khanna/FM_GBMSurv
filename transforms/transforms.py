@@ -4,8 +4,8 @@ from monai.transforms.intensity.dictionary import ScaleIntensityRangePercentiles
 from monai.transforms.compose import Compose
 from monai.transforms.io.dictionary import LoadImaged
 from monai.transforms.utility.dictionary import EnsureChannelFirstd, DeleteItemsd, ToTensord, Lambdad
-from monai.transforms.spatial.dictionary import Orientationd, Spacingd
-from monai.transforms.intensity.dictionary import RandShiftIntensityd, RandScaleIntensityd
+from monai.transforms.spatial.dictionary import Orientationd, Spacingd, Resized, RandAffined, RandFlipd
+from monai.transforms.intensity.dictionary import RandShiftIntensityd, RandScaleIntensityd, RandGaussianSmoothd, RandGaussianNoised, RandAdjustContrastd, RandBiasFieldd, RandGibbsNoised, RandRicianNoised
 import numpy as np 
 import torch
 
@@ -207,8 +207,8 @@ def custom_transform(config):
         EnsureChannelFirstd(keys=["image", "seg"], allow_missing_keys=True),
         get_normalization_transform(config),
         Orientationd(keys=['image', "seg"], axcodes=config["data"]["orientation"], allow_missing_keys=True, labels=None),        
-        Spacingd(keys=['image', "seg"], pixdim=(1.0, 1.0, 1.0), mode='bilinear', allow_missing_keys=True),
-        CropForegroundd(keys=['image', "seg"], source_key='image', allow_missing_keys=True),        
+        Spacingd(keys=['image', "seg"], pixdim=(1.0, 1.0, 1.0), mode=['bilinear', 'nearest'], allow_missing_keys=True),
+        CropForegroundd(keys=['image', "seg"], source_key='image', allow_missing_keys=True),
         # comment out if non binary weighting
         Lambdad(
             keys=['seg'],
@@ -232,9 +232,73 @@ def custom_transform(config):
         RandScaleIntensityd(keys=['image'], factors=0.1, prob=config["training"].get("scale_intensity", 0.0)),
         ToTensord(keys=["image", "label", "event"], dtype=torch.float32, track_meta=False, allow_missing_keys=False)
     ])
+    elif train_roi_type == "resize":
+        # BrainIAC-style: squash the full volume to the target size with trilinear
+        # interpolation.  No resampling, no cropping — must match pretraining transforms.
+        # Augmentation matches BrainIAC/src/dataset.py get_default_transform_quad exactly.
+        print("Using global resize for training (BrainIAC-style)")
+        train_transform = Compose([
+            LoadImaged(keys=['image']),
+            EnsureChannelFirstd(keys=["image"]),
+            get_normalization_transform(config),
+            Resized(keys=['image'], spatial_size=config["data"]["train_patch_shape"], mode="trilinear"),
+            RandAffined(
+                keys=['image'],
+                rotate_range=(0.1, 0.1, 0.1),
+                translate_range=(5, 5, 5),
+                scale_range=(0.1, 0.1, 0.1),
+                prob=0.5,
+                padding_mode="border"
+            ),
+            RandFlipd(keys=['image'], spatial_axis=[2], prob=0.5),
+            RandGaussianSmoothd(keys=['image'], prob=0.2),
+            RandGaussianNoised(keys=['image'], prob=0.2, std=0.05),
+            RandAdjustContrastd(keys=['image'], prob=0.2, gamma=(0.7, 1.3)),
+            ToTensord(keys=["image", "label", "event"], dtype=torch.float32, track_meta=False)
+        ])
+
+    elif train_roi_type == "full_volume":
+        print("Using full volume (foreground crop + pad) for training")
+        train_transform = Compose([
+            LoadImaged(keys=['image']),
+            EnsureChannelFirstd(keys=["image"]),
+            get_normalization_transform(config),
+            Orientationd(keys=['image'], axcodes=config["data"]["orientation"], labels=None),
+            Spacingd(keys=['image'], pixdim=(1.0, 1.0, 1.0), mode='bilinear'),
+            CropForegroundd(keys=['image'], source_key='image'),
+            # Center-clip first (handles brains larger than target), then pad if smaller
+            CenterSpatialCropd(keys=['image'], roi_size=config["data"]["train_patch_shape"]),
+            SpatialPadd(keys=['image'], spatial_size=config["data"]["train_patch_shape"], mode='constant'),
+            # L-R flip only (axis 0 = R-L in RAS) — the one anatomically symmetric axis for brain
+            RandFlipd(keys=['image'], spatial_axis=[0], prob=0.5),
+            # Small affine: ±3° rotation, ±5% scale — scanner positioning / anatomy variation
+            RandAffined(
+                keys=['image'],
+                rotate_range=(0.05, 0.05, 0.05),
+                scale_range=(0.05, 0.05, 0.05),
+                prob=0.5,
+                padding_mode="border",
+            ),
+            # MRI B1 field inhomogeneity — near-ubiquitous smooth gain gradient across the brain
+            RandBiasFieldd(keys=['image'], coeff_range=(0.0, 0.1), degree=3, prob=0.3),
+            # Global intensity augmentations — prob controlled by config (default 0 = off)
+            RandShiftIntensityd(keys=['image'], offsets=0.1, prob=config["training"].get("shift_intensity", 0.0)),
+            RandScaleIntensityd(keys=['image'], factors=0.1, prob=config["training"].get("scale_intensity", 0.0)),
+            # Rician noise — physically correct noise model for MRI magnitude images
+            RandRicianNoised(keys=['image'], prob=0.2, mean=0.0, std=0.05, channel_wise=True, relative=True),
+            # Gibbs ringing — truncated k-space artifact at tissue/CSF boundaries
+            RandGibbsNoised(keys=['image'], prob=0.15, alpha=(0.45, 0.75)),
+            # Scanner PSF variation
+            RandGaussianSmoothd(keys=['image'], prob=0.15),
+            # Contrast variation
+            RandAdjustContrastd(keys=['image'], prob=0.2, gamma=(0.75, 1.25)),
+            DeleteItemsd(keys=['seg']),
+            ToTensord(keys=["image", "label", "event"], dtype=torch.float32, track_meta=False),
+        ])
+
     else:
-        raise ValueError(f"Unsupported train_roi_type: {train_roi_type}. Supported types: random, seg_weighted")
-    
+        raise ValueError(f"Unsupported train_roi_type: {train_roi_type}. Supported types: random, seg_weighted, resize, full_volume")
+
     val_roi_type = config["data"]["val_roi_type"]
     if val_roi_type == "center_crop":      
         print("Using center cropping for validation")  
@@ -259,13 +323,13 @@ def custom_transform(config):
         EnsureChannelFirstd(keys=["image", "seg"], allow_missing_keys=True),
         get_normalization_transform(config),
         Orientationd(keys=['image', "seg"], axcodes=config["data"]["orientation"], allow_missing_keys=True, labels=None),        
-        Spacingd(keys=['image', "seg"], pixdim=(1.0, 1.0, 1.0), mode='bilinear', allow_missing_keys=True),
-        CropForegroundd(keys=['image', "seg"], source_key='image', allow_missing_keys=True),       
+        Spacingd(keys=['image', "seg"], pixdim=(1.0, 1.0, 1.0), mode=['bilinear', 'nearest'], allow_missing_keys=True),
+        CropForegroundd(keys=['image', "seg"], source_key='image', allow_missing_keys=True),
         Lambdad(
             keys=['seg'],
             func=lambda x: (x > 0).astype(np.float32),
             allow_missing_keys=True
-        ),  
+        ),
         TumorCenterCrop(
             keys=['image'],
             seg_key='seg',
@@ -280,9 +344,35 @@ def custom_transform(config):
         ToTensord(keys=["image", "label", "event"], dtype=torch.float32, track_meta=False, allow_missing_keys=False)
         ])
 
+    elif val_roi_type == "resize":
+        print("Using global resize for validation (BrainIAC-style)")
+        val_transform = Compose([
+            LoadImaged(keys=['image']),
+            EnsureChannelFirstd(keys=["image"]),
+            get_normalization_transform(config),
+            Resized(keys=['image'], spatial_size=config["data"]["val_patch_shape"], mode="trilinear"),
+            ToTensord(keys=["image", "label", "event"], dtype=torch.float32, track_meta=False)
+        ])
+
+    elif val_roi_type == "full_volume":
+        print("Using full volume (foreground crop + pad) for validation")
+        val_transform = Compose([
+            LoadImaged(keys=['image']),
+            EnsureChannelFirstd(keys=["image"]),
+            get_normalization_transform(config),
+            Orientationd(keys=['image'], axcodes=config["data"]["orientation"], labels=None),
+            Spacingd(keys=['image'], pixdim=(1.0, 1.0, 1.0), mode='bilinear'),
+            CropForegroundd(keys=['image'], source_key='image'),
+            # Center-clip first (handles brains larger than target), then pad if smaller
+            CenterSpatialCropd(keys=['image'], roi_size=config["data"]["val_patch_shape"]),
+            SpatialPadd(keys=['image'], spatial_size=config["data"]["val_patch_shape"], mode='constant'),
+            DeleteItemsd(keys=['seg']),
+            ToTensord(keys=["image", "label", "event"], dtype=torch.float32, track_meta=False),
+        ])
+
     else:
-        raise ValueError(f"Unsupported val_roi_type: {val_roi_type}. Supported types: center_crop, tumor_centered")
-        
+        raise ValueError(f"Unsupported val_roi_type: {val_roi_type}. Supported types: center_crop, tumor_centered, resize, full_volume")
+
     return train_transform, val_transform
 
 
