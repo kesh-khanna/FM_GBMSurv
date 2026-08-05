@@ -11,6 +11,8 @@ def create_optimizer_scheduler(model: BasePredictionModel, config):
     """
 
     wd = float(config["training"]["reg_weight"])
+    backbone_wd = float(config["training"].get("backbone_reg_weight", wd))
+    head_wd     = float(config["training"].get("head_reg_weight", wd))
     backbone_lr = float(config["training"].get("backbone_lr")) # TODO make sure these 2 are required pieces in the config
     head_lr = float(config["training"].get("head_lr"))
     optim_name = config["training"]["optim_name"].lower()
@@ -25,14 +27,14 @@ def create_optimizer_scheduler(model: BasePredictionModel, config):
     head_params = [p for p in groups.get("head", []) if p.requires_grad]
     all_head_params = pooling_params + head_params
 
-    print(f"Using two LRs: backbone_lr={backbone_lr} head_lr={head_lr} wd={wd} optim={optim_name}")
+    print(f"Using two LRs: backbone_lr={backbone_lr} head_lr={head_lr} backbone_wd={backbone_wd} head_wd={head_wd} optim={optim_name}")
     print(f"Trainable params: backbone={sum(p.numel() for p in encoder_params):,}, "
           f"head={sum(p.numel() for p in all_head_params):,} "
           f"(pooling={sum(p.numel() for p in pooling_params):,} + mlp={sum(p.numel() for p in head_params):,})")
 
     param_groups = [
-        {"params": encoder_params, "lr": backbone_lr, "weight_decay": wd},
-        {"params": all_head_params, "lr": head_lr, "weight_decay": wd},
+        {"params": encoder_params,  "lr": backbone_lr, "weight_decay": backbone_wd},
+        {"params": all_head_params, "lr": head_lr,     "weight_decay": head_wd},
     ]
 
     # Optimizer
