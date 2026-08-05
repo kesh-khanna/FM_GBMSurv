@@ -10,7 +10,7 @@ from embedders.feature_extractors import (
     SwinViTEmbedder, TriadSwinViTEmbedder,
     BrainIACEmbedder, MultiScaleBrainIACEmbedder,
 )
-from classifiers.survival_models import DeepSurvNet, LogisticHazardNet
+from classifiers.survival_models import DeepSurvNet
 
 from typing import Dict, Any
 import torch.nn as nn
@@ -19,24 +19,12 @@ import torch
 
 
 def _wrap_head(embedder, embedding_dim: int, config: Dict[str, Any]) -> nn.Module:
-    """Wrap embedder in either DeepSurvNet (Cox) or LogisticHazardNet based on config."""
-    head_type = config["model"].get("head_type", "cox").lower()
-    hidden_dims = config["model"].get("hidden_dims", [256])
-    return_emb = config["model"].get("return_embeddings", False)
-
-    if head_type == "logistic_hazard":
-        return LogisticHazardNet(
-            embedder=embedder,
-            embedding_dim=embedding_dim,
-            hidden_dims=hidden_dims,
-            n_intervals=config["model"].get("n_intervals", 16),
-            return_embeddings=return_emb,
-        )
+    """Wrap embedder in a DeepSurvNet (Cox proportional-hazards) head."""
     return DeepSurvNet(
         embedder=embedder,
         embedding_dim=embedding_dim,
-        hidden_dims=hidden_dims,
-        return_embeddings=return_emb,
+        hidden_dims=config["model"].get("hidden_dims", [256]),
+        return_embeddings=config["model"].get("return_embeddings", False),
     )
 
 

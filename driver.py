@@ -63,13 +63,6 @@ class ModelTrainer:
 
         self.loss_module = neg_partial_log_likelihood
 
-        # discrete-time head support
-        self.head_type = config["model"].get("head_type", "cox").lower()
-        self.labtrans = None  # set externally via set_label_transform() before training
-        if self.head_type == "logistic_hazard":
-            from survival_utils.nll_loss import nll_logistic_hazard
-            self._nll_loghaz = nll_logistic_hazard
-
         # time horizon for AUC
         self.new_time = torch.tensor(config["training"]["new_time"])
 
@@ -105,24 +98,6 @@ class ModelTrainer:
         self.train_cindex: list[float] = []
         self.val_cindex: list[float] = []
     
-    def set_label_transform(self, labtrans):
-        """Attach a fitted LabTransDiscreteTime for the logistic_hazard path."""
-        self.labtrans = labtrans
-
-    def _phi_to_risk(self, phi: torch.Tensor) -> torch.Tensor:
-        """[B, K] logits → [B, 1] scalar risk score (neg final survival). Float32."""
-        hazard = torch.sigmoid(phi.float())
-        surv = (1.0 - hazard + 1e-7).log().cumsum(dim=1).exp()
-        return -surv[:, -1].unsqueeze(1)
-
-    def _phi_to_risk_at_horizon(self, phi: torch.Tensor) -> torch.Tensor:
-        """[B, K] logits → [B, 1] risk at the cut nearest to new_time. For AUC."""
-        hazard = torch.sigmoid(phi.float())
-        surv = (1.0 - hazard + 1e-7).log().cumsum(dim=1).exp()
-        cuts = torch.from_numpy(self.labtrans.cuts).float()
-        k_star = int(torch.argmin(torch.abs(cuts - float(self.new_time))))
-        return -surv[:, k_star].unsqueeze(1)
-
     def save_checkpoint(self, is_best=False, is_last=False):
         """
         save model checkpoint and relevant states if they are available
@@ -136,7 +111,6 @@ class ModelTrainer:
             'global_step': self.global_step,
             'config': self.config,
             'scaler': self.scaler.state_dict() if hasattr(self, 'scaler') else None,
-            'labtrans_cuts': self.labtrans.cuts if self.labtrans is not None else None,
         }
         
         if is_best:
@@ -252,65 +226,34 @@ class ModelTrainer:
         num_loss_computations = 0
 
         all_log_hz, all_time, all_events = [], [], []
-        all_auc_risk = []  # logistic_hazard only: horizon-specific risk for AUC
 
         for batch_idx, batch in enumerate(tqdm(train_loader, desc='Training', disable=disable_pbar)):
             images = batch['image'].to(self.device, non_blocking=True)
             time = batch['label'].to(self.device, non_blocking=True)
             events = batch['event'].bool().to(self.device, non_blocking=True)
 
-            if self.head_type == "logistic_hazard":
-                # --- discrete-time path ---
-                import numpy as np
-                time_np = time.detach().cpu().numpy()
-                evt_np  = events.detach().cpu().float().numpy()
-                idx_dur_np, evt_disc_np = self.labtrans.transform(time_np, evt_np)
-                idx_dur  = torch.from_numpy(idx_dur_np).long().to(self.device)
-                evt_disc = torch.from_numpy(evt_disc_np).float().to(self.device)
+            with torch.amp.autocast("cuda", enabled=self.config["training"]["mixed_precision"]):
+                log_hz = self.model(images)
 
-                with torch.amp.autocast("cuda", enabled=self.config["training"]["mixed_precision"]):
-                    phi = self.model(images)
+            # Save detached copies for epoch metrics.
+            # NOTE: this happens before the zero-event skip below, so batches that
+            # contribute no gradient still contribute to the epoch-level metrics.
+            all_log_hz.append(log_hz.detach().cpu())
+            all_time.append(time.detach().cpu())
+            all_events.append(events.detach().cpu())
 
-                with torch.amp.autocast("cuda", enabled=False):
-                    loss = self._nll_loghaz(phi.float(), idx_dur, evt_disc, reduction="mean")
+            # Cox loss expects float64 for stability
+            with torch.amp.autocast("cuda", enabled=False):
+                log_hz64 = log_hz.double()
+                loss = self.loss_module(
+                    log_hz64,
+                    event=events,
+                    time=time,
+                    reduction="mean"
+                )
 
-                risk = self._phi_to_risk(phi.detach())
-                all_log_hz.append(risk.cpu())
-                all_auc_risk.append(self._phi_to_risk_at_horizon(phi.detach()).cpu())
-                all_time.append(time.detach().cpu())
-                all_events.append(events.detach().cpu())
-
-                if not torch.isfinite(loss):
-                    logger.warning(f"Batch {batch_idx+1}: non-finite loss, skipping update")
-                    self.optimizer.zero_grad(set_to_none=True)
-                    continue
-                if evt_disc.sum() == 0:
-                    if not disable_pbar:
-                        tqdm.write(f"Batch {batch_idx+1}: no events after discretization, skipping update")
-                    self.optimizer.zero_grad(set_to_none=True)
-                    continue
-            else:
-                # --- original Cox path (unchanged) ---
-                with torch.amp.autocast("cuda", enabled=self.config["training"]["mixed_precision"]):
-                    log_hz = self.model(images)
-
-                # Save detached copies for epoch metrics
-                all_log_hz.append(log_hz.detach().cpu())
-                all_time.append(time.detach().cpu())
-                all_events.append(events.detach().cpu())
-
-                # Cox loss expects float64 for stability
-                with torch.amp.autocast("cuda", enabled=False):
-                    log_hz64 = log_hz.double()
-                    loss = self.loss_module(
-                        log_hz64,
-                        event=events,
-                        time=time,
-                        reduction="mean"
-                    )
-
-            # skip if no events in this mini-batch (Cox path only — discrete path handles above)
-            if self.head_type == "cox" and events.sum() == 0:
+            # skip if no events in this mini-batch
+            if events.sum() == 0:
                 if not disable_pbar:
                     tqdm.write(f"Batch {batch_idx+1}: no events, skipping update")
                 self.optimizer.zero_grad(set_to_none=True)
@@ -361,8 +304,7 @@ class ModelTrainer:
             all_events = torch.cat(all_events, dim=0).bool()
 
             new_time = self.new_time
-            auc_risk = torch.cat(all_auc_risk, dim=0) if all_auc_risk else all_log_hz
-            train_auc = self.training_auc(auc_risk, all_events, all_time, new_time=new_time)
+            train_auc = self.training_auc(all_log_hz, all_events, all_time, new_time=new_time)
             train_c = self.training_c(all_log_hz, all_events, all_time)
 
         else:
@@ -388,14 +330,11 @@ class ModelTrainer:
         self.model.eval()
         
         all_log_hz, all_time, all_events = [], [], []
-        all_auc_risk = []  # logistic_hazard only: horizon-specific risk for AUC
 
         logger.info("collecting predictions for validation...")
 
         self.val_auc = Auc()
         self.val_c = ConcordanceIndex()
-
-        all_phi = []  # logistic_hazard only: accumulate raw [B,K] logits for NLL loss
 
         with torch.no_grad():
             for batch_idx, batch in enumerate(tqdm(val_loader, desc='Validation', disable=disable_pbar)):
@@ -406,12 +345,7 @@ class ModelTrainer:
                 with torch.amp.autocast("cuda", enabled=self.config["training"]["mixed_precision"]):
                     out = self.model(images)
 
-                if self.head_type == "logistic_hazard":
-                    all_phi.append(out.detach().cpu())
-                    all_log_hz.append(self._phi_to_risk(out).cpu())
-                    all_auc_risk.append(self._phi_to_risk_at_horizon(out).cpu())
-                else:
-                    all_log_hz.append(out.cpu())
+                all_log_hz.append(out.cpu())
                 all_time.append(time.cpu())
                 all_events.append(events.cpu())
 
@@ -423,23 +357,12 @@ class ModelTrainer:
             new_time = self.new_time
 
             with torch.amp.autocast("cuda", enabled=False):
-                if self.head_type == "logistic_hazard":
-                    import numpy as np
-                    time_np = all_time.numpy()
-                    evt_np  = all_events.float().numpy()
-                    idx_dur_np, evt_disc_np = self.labtrans.transform(time_np, evt_np)
-                    all_phi_cat = torch.cat(all_phi, dim=0).float()
-                    idx_dur  = torch.from_numpy(idx_dur_np).long()
-                    evt_disc = torch.from_numpy(evt_disc_np).float()
-                    val_loss = self._nll_loghaz(all_phi_cat, idx_dur, evt_disc, reduction="mean").item()
-                else:
-                    # NOTE: Cox NLL on full val set is not directly comparable to per-batch train loss
-                    all_log_hz_d = all_log_hz.double()
-                    val_loss = self.loss_module(all_log_hz_d, event=all_events, time=all_time, reduction="mean").item()
+                # NOTE: Cox NLL on full val set is not directly comparable to per-batch train loss
+                all_log_hz_d = all_log_hz.double()
+                val_loss = self.loss_module(all_log_hz_d, event=all_events, time=all_time, reduction="mean").item()
 
             # calculate the metrics
-            auc_risk = torch.cat(all_auc_risk, dim=0) if all_auc_risk else all_log_hz
-            val_auc = self.val_auc(auc_risk, all_events, all_time, new_time=new_time)
+            val_auc = self.val_auc(all_log_hz, all_events, all_time, new_time=new_time)
             val_c = self.val_c(all_log_hz, all_events, all_time)
 
         else:
@@ -593,11 +516,9 @@ class ModelTrainer:
         plt.close(fig)
 
     def eval_predict(self, data_loader, checkpoint_path=None, disable_pbar=False,
-                     dataset_name="Test", save_surv_matrix_path=None):
+                     dataset_name="Test"):
         """
         Evaluate for testing and store the final predictions for potential saving.
-        If save_surv_matrix_path is provided and head_type='logistic_hazard', saves
-        the [N, K] survival matrix as a .npy file.
         """
         if checkpoint_path:
             self.load_checkpoint(checkpoint_path=checkpoint_path)
@@ -605,8 +526,6 @@ class ModelTrainer:
         self.model.eval()
 
         all_log_hz, all_time, all_events, all_patient_ids = [], [], [], []
-        all_phi = []       # logistic_hazard only
-        all_auc_risk = []  # logistic_hazard only: horizon-specific risk for AUC
 
         # reset the metrics
         self.testing_auc = Auc()
@@ -622,12 +541,7 @@ class ModelTrainer:
                 with torch.amp.autocast("cuda", enabled=self.config["training"]["mixed_precision"]):
                     out = self.model(images)
 
-                if self.head_type == "logistic_hazard":
-                    all_phi.append(out.detach().cpu())
-                    all_log_hz.append(self._phi_to_risk(out).cpu())
-                    all_auc_risk.append(self._phi_to_risk_at_horizon(out).cpu())
-                else:
-                    all_log_hz.append(out.cpu())
+                all_log_hz.append(out.cpu())
                 all_time.append(time.cpu())
                 all_events.append(events.cpu())
                 all_patient_ids.extend(patient_id)
@@ -640,16 +554,7 @@ class ModelTrainer:
             all_time_tensor = torch.cat(all_time, dim=0).float()
             all_events_tensor = torch.cat(all_events, dim=0).bool()
 
-            if all_auc_risk:
-                auc_risk_tensor = torch.cat(all_auc_risk, dim=0).float()
-                import numpy as _np
-                _cuts = self.labtrans.cuts
-                _k = int(_np.argmin(_np.abs(_cuts - float(self.new_time))))
-                logger.info(f"AUC risk: using cut index {_k} (t={_cuts[_k]:.1f}d) nearest to new_time={float(self.new_time):.1f}d")
-            else:
-                auc_risk_tensor = all_log_hz_tensor
-
-            test_auc = self.testing_auc(auc_risk_tensor, all_events_tensor, all_time_tensor, new_time=self.new_time.float())
+            test_auc = self.testing_auc(all_log_hz_tensor, all_events_tensor, all_time_tensor, new_time=self.new_time.float())
             test_auc_ci = self.testing_auc.confidence_interval(method="bootstrap")
             test_c = self.testing_c(all_log_hz_tensor, all_events_tensor, all_time_tensor)
             test_c_ci = self.testing_c.confidence_interval(method="bootstrap")
@@ -671,15 +576,6 @@ class ModelTrainer:
                 'time': all_time_tensor.numpy().flatten(),
                 'event': all_events_tensor.numpy().astype(bool).flatten()
             })
-
-            # Save survival matrix for discrete-time extended metrics
-            if self.head_type == "logistic_hazard" and save_surv_matrix_path is not None:
-                import numpy as np
-                all_phi_cat = torch.cat(all_phi, dim=0).float()
-                hazard = torch.sigmoid(all_phi_cat)
-                surv_matrix = (1.0 - hazard + 1e-7).log().cumsum(dim=1).exp().numpy()
-                np.save(save_surv_matrix_path, surv_matrix.astype("float32"))
-                logger.info(f"Survival matrix [{surv_matrix.shape}] saved to {save_surv_matrix_path}")
 
         else:
             logger.warning("No data processed")
@@ -771,24 +667,6 @@ def main():
     check_censoring(val_data, "Validation")
     check_censoring(test_data, "Testing")
 
-    # --- discrete-time label transform (fit on training fold only, no leakage) ---
-    head_type = config["model"].get("head_type", "cox").lower()
-    labtrans = None
-    if head_type == "logistic_hazard":
-        from survival_utils.label_transforms import LabTransDiscreteTime
-        n_intervals = config["model"].get("n_intervals", 16)
-        scheme = config["model"].get("discretization_scheme", "quantiles")
-        _train_items = train_data.values() if isinstance(train_data, dict) else train_data
-        train_times  = np.array([float(v["label"]) for v in _train_items])
-        train_events = np.array([int(v["event"])   for v in _train_items])
-        labtrans = LabTransDiscreteTime(n_intervals, scheme=scheme)
-        labtrans.fit(train_times, train_events)
-        assert np.all(labtrans.cuts[1:] > labtrans.cuts[:-1]), "Label transform cuts are not monotonic"
-        assert labtrans.out_features == n_intervals, \
-            f"Expected {n_intervals} intervals, got {labtrans.out_features}"
-        logger.info(f"Label transform: K={n_intervals}, scheme={scheme}")
-        logger.info(f"Cuts (rounded): {labtrans.cuts.round(1).tolist()}")
-
     train_transforms, val_transforms = custom_transform(config)
 
     if args.predict_only:
@@ -829,22 +707,6 @@ def main():
     # make our model self
     trainer = ModelTrainer(model, device, config, output_dir)
 
-    if head_type == "logistic_hazard":
-        if not args.predict_only and labtrans is not None:
-            # Save cuts alongside the run so predict-only can reload without the JSON
-            np.save(os.path.join(output_dir, "labtrans_cuts.npy"), labtrans.cuts)
-            trainer.set_label_transform(labtrans)
-        elif args.predict_only:
-            cuts_path = os.path.join(output_dir, "labtrans_cuts.npy")
-            if os.path.exists(cuts_path):
-                from survival_utils.label_transforms import LabTransDiscreteTime
-                cuts = np.load(cuts_path)
-                labtrans = LabTransDiscreteTime(cuts)
-                trainer.set_label_transform(labtrans)
-                logger.info(f"Loaded label transform cuts from {cuts_path}")
-            else:
-                logger.error(f"labtrans_cuts.npy not found at {cuts_path}. Cannot run predict-only.")
-
     if not args.predict_only:
         trainer.train(train_loader, val_loader, disable_pbar=args.disable_progress_bar)
     
@@ -865,16 +727,11 @@ def main():
 
     # test the model
     if test_loader:
-        test_surv_path = (
-            os.path.join(pred_path, f"{config['output']['save_name']}_test_surv_matrix.npy")
-            if head_type == "logistic_hazard" and pred_path else None
-        )
         test_results, test_preds = trainer.eval_predict(
             test_loader,
             checkpoint_path=eval_checkpoint,
             disable_pbar=args.disable_progress_bar,
             dataset_name="Test",
-            save_surv_matrix_path=test_surv_path,
         )
         results_summary["test_results"] = test_results
         print("-"*80, "\n")
@@ -882,7 +739,6 @@ def main():
         logger.warning("No test data provided, skipping evaluation on \"test set\"")
         print("-"*80, "\n")
         test_results, test_preds = None, None
-        test_surv_path = None
 
     # final test on the train and validation sets
     if eval_train_dataloader:
@@ -914,36 +770,6 @@ def main():
         logger.warning("No validation data provided, skipping evaluation on validation set")
         print("-"*80, "\n")
         val_results, val_preds = None, None
-
-    # --- extended discrete-time metrics (Brier score, horizon AUROC, calibration) ---
-    if head_type == "logistic_hazard" and test_preds is not None and test_surv_path and os.path.exists(test_surv_path):
-        logger.info("Computing extended discrete-time metrics on test set...")
-        from survival_utils.eval_metrics import brier_scores, integrated_brier_score, horizon_aucs, calibration_at_horizon
-        surv_matrix = np.load(test_surv_path)  # [N, K]
-        durations = test_preds["time"].values
-        events    = test_preds["event"].values.astype(float)
-        eval_horizons = config["output"].get("eval_horizons", [180, 240, 300, 365, 500])
-        cal_horizons  = config["output"].get("calibration_horizons", [365, 548])
-
-        bs_dict = brier_scores(surv_matrix, labtrans.cuts, durations, events, eval_horizons)
-        ibs = integrated_brier_score(surv_matrix, labtrans.cuts, durations, events, eval_horizons)
-        h_auc = horizon_aucs(surv_matrix, labtrans.cuts, durations, events, eval_horizons)
-        cal = [calibration_at_horizon(surv_matrix, labtrans.cuts, durations, events, t)
-               for t in cal_horizons]
-
-        extended = {
-            "brier_scores": {str(int(t)): float(v) for t, v in bs_dict.items()},
-            "integrated_brier_score": float(ibs),
-            "horizon_auc": {str(int(t)): float(v) for t, v in h_auc.items()},
-            "calibration": cal,
-        }
-        results_summary["test_extended_metrics"] = extended
-        logger.info(f"IBS: {ibs:.4f}")
-        for t, v in bs_dict.items():
-            logger.info(f"  Brier@{int(t)}d: {v:.4f}")
-        for t, v in h_auc.items():
-            logger.info(f"  AUC@{int(t)}d:   {v:.4f}")
-        print("-"*80, "\n")
 
     # save the results summary to a JSON file
     with open(os.path.join(output_dir, "results_summary.json"), "w") as f:
