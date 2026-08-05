@@ -7,6 +7,10 @@ from timm.layers import DropPath
 layer_scale = False
 init_value = 1e-6
 
+"""
+Adapted from BrainMVP codebase
+"""
+
 class Mlp(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
         super().__init__()
@@ -305,7 +309,7 @@ class UniFormer(nn.Module):
 
 def set_trainable_uniformer(
     model,
-    train_patch_embed1=False,   # raw input adaptation (esp for stacking modalities)
+    train_patch_embed1=False,   # raw input adaptation (for stacking modalities)
     train_stage1=False,
     train_stage2=False,
     train_stage3=False,

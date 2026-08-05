@@ -811,6 +811,9 @@ def set_trainable_swin(
     - Freezes all params first.
     - Can unfreeze patch_embed.
     - Can unfreeze layers1..layers4.
+    - For use_v2 models (Triad SwinB), layers1c..layers4c residual conv adapters are tied
+      to their corresponding train_layerN flag — if train_layer1=True, both layers1 and
+      layers1c are unfrozen, and so on.
     - Optionally unfreezes all LayerNorm parameters globally.
     - layernorm_only=True: only LayerNorm params are trainable (common/lightweight adaptation).
     """
@@ -867,6 +870,17 @@ def set_trainable_swin(
         _unfreeze("layers3", model.layers3)
     if train_layer4:
         _unfreeze("layers4", model.layers4)
+
+    # V2 residual conv adapters (Triad SwinB): tie to the corresponding stage flag
+    if hasattr(model, "layers1c"):
+        if train_layer1:
+            _unfreeze("layers1c", model.layers1c)
+        if train_layer2:
+            _unfreeze("layers2c", model.layers2c)
+        if train_layer3:
+            _unfreeze("layers3c", model.layers3c)
+        if train_layer4:
+            _unfreeze("layers4c", model.layers4c)
 
     # train all LayerNorm params globally for PEFT
     if train_all_layernorm:
