@@ -3,17 +3,12 @@ Author: Rakesh Khanna
 """
 import argparse
 import pandas as pd
-import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 from monai.data import set_track_meta
 import time
 import os
-from monai.data import Dataset, CacheDataset, DataLoader
 
-from torchsurv.loss.cox import neg_partial_log_likelihood
-from torchsurv.metrics.auc import Auc
-from torchsurv.metrics.cindex import ConcordanceIndex
 from tqdm import tqdm
 import logging
 from torch.amp import GradScaler
@@ -22,13 +17,13 @@ import json
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-import torch
-
 from create_model import create_model
 from transforms.transforms import custom_transform
-from utils.torch_utils import set_seed, set_bn_eval
-
-from utils.utils import check_censoring, load_config, save_config
+from utils.torch_utils import (set_seed, set_bn_eval, cox_loss_f64,
+                               compute_survival_metrics, compute_group_grad_norms,
+                               load_model_weights)
+from utils.utils import check_censoring, load_config, save_config, plot_training_curves, save_prediction_csvs
+from utils.data_utils import load_split_data, build_loaders
 from optimizers.create_optimizer import create_optimizer_scheduler
 
 class ModelTrainer:
@@ -37,16 +32,16 @@ class ModelTrainer:
         self.device = device
         self.config = config
         self.output_dir = output_dir
-        
+
         self.max_epochs = config["training"]["max_epochs"]
         self.head_lr = config["training"]["head_lr"]
         self.backbone_lr = config["training"]["backbone_lr"]
         self.weight_decay = config["training"]["reg_weight"]
-        
+
         # validation settings
         self.evaluation_strategy = config["training"].get("evaluation_strategy", "last_epoch")
         self.patience = config["training"].get("patience", 10)
-        
+
         # Validation modes: "early_stopping", "monitor_only", "none"
         assert self.evaluation_strategy in ["best_val_cindex", "last_epoch"], \
             f"evaluation_strategy must be one of: best_val_cindex, or last_epoch. Got: {self.evaluation_strategy}"
@@ -60,13 +55,11 @@ class ModelTrainer:
 
         self.optimizer, self.scheduler = create_optimizer_scheduler(self.model, config)
 
-        self.loss_module = neg_partial_log_likelihood
-
         # time horizon for AUC
         self.new_time = torch.tensor(config["training"]["new_time"])
 
         print(f"Using new_time: {self.new_time.item()} days for AUC calculation")
-        
+
         # tracking variables
         self.score = -float('inf')
 
@@ -76,27 +69,17 @@ class ModelTrainer:
 
         # setup tensorboard
         self.writer = SummaryWriter(log_dir=os.path.join(output_dir, 'tensorboard'))
-        
+
         # create checkpoint directory
         self.checkpoint_dir = os.path.join(output_dir, 'checkpoints')
         os.makedirs(self.checkpoint_dir, exist_ok=True)
-        
-        # Training metrics
-        self.training_auc = None
-        self.training_c = None
-        # Validation metrics
-        self.val_auc = None
-        self.val_c = None
-        # Test metrics
-        self.testing_auc = None
-        self.testing_c = None
 
         # Loss and C-Index history for matplotlib plot
         self.train_losses: list[float] = []
         self.val_losses: list[float] = []
         self.train_cindex: list[float] = []
         self.val_cindex: list[float] = []
-    
+
     def save_checkpoint(self, is_best=False, is_last=False):
         """
         save model checkpoint and relevant states if they are available
@@ -111,7 +94,7 @@ class ModelTrainer:
             'config': self.config,
             'scaler': self.scaler.state_dict() if hasattr(self, 'scaler') else None,
         }
-        
+
         if is_best:
             # denote in filename that this is the best model with epoch and validation C-Index
             checkpoint_path = os.path.join(self.checkpoint_dir, f'model_epoch_{self.epoch}_val_cindex_{self.score:.3f}.ckpt')
@@ -136,19 +119,19 @@ class ModelTrainer:
             checkpoint_path = os.path.join(self.checkpoint_dir, f'last_epoch_{self.epoch}.ckpt')
 
         else:
-            # this is a regular checkpoint 
+            # this is a regular checkpoint
             checkpoint_path = os.path.join(self.checkpoint_dir, f'epoch_{self.epoch}.ckpt')
 
         torch.save(checkpoint, checkpoint_path)
-        
+
         logger.info(f"Checkpoint saved at epoch {self.epoch}")
-    
+
     def load_checkpoint(self, checkpoint_path):
         """Load model eval_checkpoint"""
         if not os.path.exists(checkpoint_path):
             logger.warning(f"Checkpoint {checkpoint_path} not found")
             return False
-            
+
         checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         self.model.load_state_dict(checkpoint['model_state_dict'])
 
@@ -167,31 +150,23 @@ class ModelTrainer:
         self.score = checkpoint['score']
         self.global_step = checkpoint['global_step']
         self.epoch = checkpoint['epoch']
-        
+
         logger.info(f"Checkpoint loaded from {checkpoint_path}")
         logger.info(f"Model loaded from: epoch {self.epoch}, global step {self.global_step}")
 
         return True
 
     def load_weights_for_eval(self, checkpoint_path):
-        """Load only the model weights from a checkpoint for evaluation.
-
-        Unlike load_checkpoint, this does not restore optimizer/scheduler/scaler
-        or trainer bookkeeping, and it raises instead of returning False so a
-        bad path can never silently fall through to an untrained model.
-        """
-        if not os.path.exists(checkpoint_path):
-            raise FileNotFoundError(f"Checkpoint {checkpoint_path} not found")
-
-        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
-        self.model.load_state_dict(checkpoint['model_state_dict'])
+        """Load only the model weights for evaluation; raises instead of returning False
+        so a bad path can never silently fall through to an untrained model."""
+        checkpoint = load_model_weights(self.model, checkpoint_path, self.device)
         logger.info(f"Evaluation weights loaded from {checkpoint_path} (epoch {checkpoint.get('epoch')})")
-    
+
     def select_checkpoint_for_evaluation(self, predict_only=False, checkpoint_path=None):
         """
         Determine which checkpoint we want to use for the final evaluation
         """
-        # if we are in predict only mode then 
+        # if we are in predict only mode then
         # Select eval_checkpoint based on configuration
         if predict_only:
             logger.info("Running in prediction mode, using the passed eval_checkpoint")
@@ -224,19 +199,13 @@ class ModelTrainer:
                 "use evaluation_strategy='last_epoch' or provide validation data."
             )
 
-        # logger.info(f"Selected {eval_checkpoint} as our checkpoint to be used for evaluation")
-    
         return eval_checkpoint
-    
+
     def train_epoch(self, train_loader, disable_pbar=False):
         """
         Train for one epoch.
         """
         self.model.train()
-
-        # reset to be safe
-        self.training_auc = Auc()
-        self.training_c = ConcordanceIndex()
 
         # if we want to freeze the batchnorm then we have to do it at every epoch
         if self.config["model"].get("freeze_batchnorm", False):
@@ -262,15 +231,7 @@ class ModelTrainer:
             all_time.append(time.detach().cpu())
             all_events.append(events.detach().cpu())
 
-            # Cox loss expects float64 for stability
-            with torch.amp.autocast("cuda", enabled=False):
-                log_hz64 = log_hz.double()
-                loss = self.loss_module(
-                    log_hz64,
-                    event=events,
-                    time=time,
-                    reduction="mean"
-                )
+            loss = cox_loss_f64(log_hz, events, time)
 
             # skip if no events in this mini-batch
             if events.sum() == 0:
@@ -285,25 +246,15 @@ class ModelTrainer:
 
             # log gradient norms periodically to track relative learning and monitor any spikes / make sure the gradscaler is working okay
             if batch_idx % 20 == 0:  # every 20 batches
-                backbone_norm = 0
-                for p in self.optimizer.param_groups[0]['params']:
-                    if p.grad is not None:
-                        backbone_norm += p.grad.data.norm(2).item() ** 2
-                backbone_norm = backbone_norm ** 0.5
-                
-                head_norm = 0 # currnently also includes pooling params
-                for p in self.optimizer.param_groups[1]['params']:
-                    if p.grad is not None:
-                        head_norm += p.grad.data.norm(2).item() ** 2
-                head_norm = head_norm ** 0.5
-                
-                # Total
+                # group 0 = backbone, group 1 = head (currently also includes pooling params)
+                norms = compute_group_grad_norms(self.optimizer)
+                backbone_norm, head_norm = norms[0], norms[1]
                 total_norm = (backbone_norm ** 2 + head_norm ** 2) ** 0.5
-                
+
                 self.writer.add_scalar('gradients/backbone_norm', backbone_norm, self.global_step)
                 self.writer.add_scalar('gradients/head_norm', head_norm, self.global_step)
                 self.writer.add_scalar('gradients/total_norm', total_norm, self.global_step)
-                
+
                 # ratio for the relative learning
                 if backbone_norm > 0:
                     self.writer.add_scalar('gradients/head_to_backbone_ratio', head_norm / backbone_norm, self.global_step)
@@ -319,42 +270,37 @@ class ModelTrainer:
 
         # Epoch-level metrics
         if all_log_hz:
-            all_log_hz = torch.cat(all_log_hz, dim=0)
-            all_time = torch.cat(all_time, dim=0)
-            all_events = torch.cat(all_events, dim=0).bool()
-
-            new_time = self.new_time
-            train_auc = self.training_auc(all_log_hz, all_events, all_time, new_time=new_time)
-            train_c = self.training_c(all_log_hz, all_events, all_time)
-
+            metrics = compute_survival_metrics(
+                torch.cat(all_log_hz, dim=0),
+                torch.cat(all_events, dim=0).bool(),
+                torch.cat(all_time, dim=0),
+                self.new_time,
+            )
+            train_auc, train_c = metrics["auc"], metrics["c_index"]
         else:
-            train_auc = torch.Tensor(0.0)
-            train_c = torch.Tensor(0.0)
+            train_auc, train_c = 0.0, 0.0
 
         # Log metrics
         self.writer.add_scalar('Loss/Train', avg_loss, self.epoch)
-        self.writer.add_scalar('AUC/Train', train_auc.item() if hasattr(train_auc, "item") else float(train_auc), self.epoch)
-        self.writer.add_scalar('C-Index/Train', train_c.item() if hasattr(train_c, "item") else float(train_c), self.epoch)
+        self.writer.add_scalar('AUC/Train', train_auc, self.epoch)
+        self.writer.add_scalar('C-Index/Train', train_c, self.epoch)
         for i, g in enumerate(self.optimizer.param_groups):
             self.writer.add_scalar(f'LR/group_{i}', g['lr'], self.epoch)
 
-        logger.info(f"Train - Avg Loss: {avg_loss:.4f}, AUC: {float(train_auc):.4f}, C-Index: {float(train_c):.4f}")
-        return avg_loss, float(train_c)
+        logger.info(f"Train - Avg Loss: {avg_loss:.4f}, AUC: {train_auc:.4f}, C-Index: {train_c:.4f}")
+        return avg_loss, train_c
 
-    
+
     def validate_full_dataset(self, val_loader, disable_pbar=False):
         """
         Validate on entire dataset at once for survival prediction.
         This accumulates all predictions and targets before computing loss.
         """
         self.model.eval()
-        
+
         all_log_hz, all_time, all_events = [], [], []
 
         logger.info("collecting predictions for validation...")
-
-        self.val_auc = Auc()
-        self.val_c = ConcordanceIndex()
 
         with torch.no_grad():
             for batch_idx, batch in enumerate(tqdm(val_loader, desc='Validation', disable=disable_pbar)):
@@ -370,35 +316,27 @@ class ModelTrainer:
                 all_events.append(events.cpu())
 
         if all_log_hz:
-            # cat all predictions and targets
-            all_log_hz = torch.cat(all_log_hz, dim=0)
-            all_time = torch.cat(all_time, dim=0)
-            all_events = torch.cat(all_events, dim=0).bool()
-            new_time = self.new_time
-
-            with torch.amp.autocast("cuda", enabled=False):
-                # NOTE: Cox NLL on full val set is not directly comparable to per-batch train loss
-                all_log_hz_d = all_log_hz.double()
-                val_loss = self.loss_module(all_log_hz_d, event=all_events, time=all_time, reduction="mean").item()
-
-            # calculate the metrics
-            val_auc = self.val_auc(all_log_hz, all_events, all_time, new_time=new_time)
-            val_c = self.val_c(all_log_hz, all_events, all_time)
-
+            # NOTE: Cox NLL on full val set is not directly comparable to per-batch train loss
+            metrics = compute_survival_metrics(
+                torch.cat(all_log_hz, dim=0),
+                torch.cat(all_events, dim=0).bool(),
+                torch.cat(all_time, dim=0),
+                self.new_time,
+                with_loss=True,
+            )
+            val_loss, val_auc, val_c = metrics["loss"], metrics["auc"], metrics["c_index"]
         else:
-            val_loss = torch.Tensor(float('inf'))
-            val_auc = torch.Tensor(0.0)
-            val_c = torch.Tensor(0.0)
-        
+            val_loss, val_auc, val_c = float('inf'), 0.0, 0.0
+
         # Log metrics
         self.writer.add_scalar('Loss/Validation', val_loss, self.epoch)
-        self.writer.add_scalar('AUC/Validation', val_auc.item(), self.epoch)
-        self.writer.add_scalar('C-Index/Validation', val_c.item(), self.epoch)
-        
-        logger.info(f"Val - Loss: {val_loss:.4f}, AUC: {val_auc.item():.4f}, C-Index: {val_c.item():.4f}")
-        
-        return val_loss, val_auc.item(), val_c.item()
-    
+        self.writer.add_scalar('AUC/Validation', val_auc, self.epoch)
+        self.writer.add_scalar('C-Index/Validation', val_c, self.epoch)
+
+        logger.info(f"Val - Loss: {val_loss:.4f}, AUC: {val_auc:.4f}, C-Index: {val_c:.4f}")
+
+        return val_loss, val_auc, val_c
+
     def train(self, train_loader, val_loader=None, disable_pbar=False):
         """
         Full training loop with validation and early stopping
@@ -417,7 +355,7 @@ class ModelTrainer:
         print("-"*80, '\n')
 
         start_time = time.time()
-        
+
         for epoch in range(self.max_epochs):
             self.epoch = epoch
 
@@ -434,33 +372,33 @@ class ModelTrainer:
                 val_loss, val_auc, val_c = self.validate_full_dataset(val_loader, disable_pbar=disable_pbar)
                 self.val_losses.append(val_loss)
                 self.val_cindex.append(val_c)
-                
+
                 monitor = val_c
                 is_best = monitor > self.score
-                
+
                 if is_best:
                     self.score = max(monitor, self.score)
                     logger.info(f"New best validation C-Index: {val_c:.4f}")
-                    
+
                     # Only save as "best" if using early stopping
                     if self.evaluation_strategy == "best_val_cindex":
                         self.patience_counter = 0
                         self.save_checkpoint(is_best=True)
-                
-                # Early stopping 
+
+                # Early stopping
                 if self.evaluation_strategy == "best_val_cindex":
                     if not is_best:
                         self.patience_counter += 1
-                    
+
                     if self.patience_counter >= self.patience:
                         logger.info(f"Early stopping triggered after {epoch + 1} epochs")
                         self.save_checkpoint(is_best=False, is_last=True)
                         break
-        
-            
+
+
             if (epoch + 1) % self.checkpoint_frequency == 0 or (epoch + 1) == self.max_epochs:
                 self.save_checkpoint(is_best=False)
-            
+
 
         training_time = (time.time() - start_time) / 60
         logger.info(f"Training completed in {training_time:.2f} minutes")
@@ -469,71 +407,11 @@ class ModelTrainer:
             max_memory = torch.cuda.max_memory_allocated() / 1e9
             logger.info(f"Peak GPU memory usage: {max_memory:.2f} GB")
 
-        self.save_loss_plot()
+        plot_training_curves(
+            self.train_losses, self.val_losses, self.train_cindex, self.val_cindex,
+            self.output_dir, title=f"Training curves — {self.config['output']['save_name']}",
+        )
         self.writer.close()
-        
-    def save_loss_plot(self):
-        """Save a matplotlib figure with separate panels for train loss, val loss, and C-Index."""
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-
-        has_val = bool(self.val_losses)
-        train_epochs = list(range(len(self.train_losses)))
-        val_epochs   = list(range(len(self.val_losses)))
-
-        n_panels = 3 if has_val else 2
-        fig, axes = plt.subplots(1, n_panels, figsize=(4.5 * n_panels, 4))
-        fig.subplots_adjust(wspace=0.38)
-
-        try:
-            plt.style.use("seaborn-v0_8-paper")
-        except OSError:
-            plt.style.use("ggplot")
-
-        def style_ax(ax):
-            ax.spines["top"].set_visible(False)
-            ax.spines["right"].set_visible(False)
-            ax.set_xlabel("Epoch", fontsize=11)
-
-        # --- Panel 1: Train Loss ---
-        ax = axes[0]
-        ax.plot(train_epochs, self.train_losses, color="#4C72B0", linewidth=1.8)
-        ax.set_ylabel("Loss (Cox NLL, per batch)", fontsize=11)
-        ax.set_title("Train Loss", fontsize=12, fontweight="bold")
-        style_ax(ax)
-
-        panel_idx = 1
-
-        # --- Panel 2 (optional): Val Loss ---
-        if has_val:
-            ax = axes[panel_idx]
-            ax.plot(val_epochs, self.val_losses, color="#DD8452", linewidth=1.8)
-            ax.set_ylabel("Loss (Cox NLL, full val set)", fontsize=11)
-            ax.set_title("Validation Loss", fontsize=12, fontweight="bold")
-            style_ax(ax)
-            panel_idx += 1
-
-        # --- Final panel: C-Index ---
-        ax = axes[panel_idx]
-        ax.plot(train_epochs, self.train_cindex, label="Train", color="#4C72B0", linewidth=1.8)
-        if has_val:
-            ax.plot(val_epochs, self.val_cindex, label="Validation", color="#DD8452", linewidth=1.8)
-            ax.legend(fontsize=10)
-        ax.axhline(0.5, color="grey", linestyle="--", linewidth=0.8, alpha=0.7)
-        ax.set_ylabel("C-Index", fontsize=11)
-        ax.set_title("Concordance Index", fontsize=12, fontweight="bold")
-        style_ax(ax)
-
-        fig.suptitle(f"Training curves — {self.config['output']['save_name']}",
-                     fontsize=12, fontweight="bold", y=1.02)
-
-        for ext in ("png", "pdf"):
-            path = os.path.join(self.output_dir, f"training_curves.{ext}")
-            fig.savefig(path, bbox_inches="tight", dpi=150)
-            logger.info(f"Training curves saved: {path}")
-
-        plt.close(fig)
 
     def eval_predict(self, data_loader, checkpoint_path=None, disable_pbar=False,
                      dataset_name="Test"):
@@ -546,10 +424,6 @@ class ModelTrainer:
         self.model.eval()
 
         all_log_hz, all_time, all_events, all_patient_ids = [], [], [], []
-
-        # reset the metrics
-        self.testing_auc = Auc()
-        self.testing_c = ConcordanceIndex()
 
         with torch.no_grad():
             for batch_idx, batch in enumerate(tqdm(data_loader, desc="Evaluating", disable=disable_pbar)):
@@ -574,20 +448,20 @@ class ModelTrainer:
             all_time_tensor = torch.cat(all_time, dim=0).float()
             all_events_tensor = torch.cat(all_events, dim=0).bool()
 
-            test_auc = self.testing_auc(all_log_hz_tensor, all_events_tensor, all_time_tensor, new_time=self.new_time.float())
-            test_auc_ci = self.testing_auc.confidence_interval(method="bootstrap")
-            test_c = self.testing_c(all_log_hz_tensor, all_events_tensor, all_time_tensor)
-            test_c_ci = self.testing_c.confidence_interval(method="bootstrap")
+            metrics = compute_survival_metrics(
+                all_log_hz_tensor, all_events_tensor, all_time_tensor,
+                self.new_time.float(), with_ci=True,
+            )
 
             results = {
-                f'{dataset_name}_auc': test_auc.item(),
-                f'{dataset_name}_c_index': test_c.item(),
-                f'{dataset_name}_auc_ci': test_auc_ci.tolist(),
-                f'{dataset_name}_c_index_ci': test_c_ci.tolist()
+                f'{dataset_name}_auc': metrics['auc'],
+                f'{dataset_name}_c_index': metrics['c_index'],
+                f'{dataset_name}_auc_ci': metrics['auc_ci'],
+                f'{dataset_name}_c_index_ci': metrics['c_index_ci']
             }
 
-            logger.info(f"{dataset_name} - AUC: {test_auc.item():.4f}, C-Index: {test_c:.4f}")
-            logger.info(f"{dataset_name} - AUC CI: {test_auc_ci.tolist()}, C-Index CI: {test_c_ci.tolist()}")
+            logger.info(f"{dataset_name} - AUC: {metrics['auc']:.4f}, C-Index: {metrics['c_index']:.4f}")
+            logger.info(f"{dataset_name} - AUC CI: {metrics['auc_ci']}, C-Index CI: {metrics['c_index_ci']}")
 
             risk_col = 'log_hz'  # name preserved for CSV compatibility
             pred_df = pd.DataFrame({
@@ -625,67 +499,11 @@ def main():
     set_seed(config["training"]["seed"])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     set_track_meta(True)
-    
+
     logger.info(f"config loaded from: {args.config_file}")
     print("-"*80, "\n")
 
-    # load in the json file
-    with open(config["data"]["json_file"], "r") as f:
-        json_data = json.load(f)
-
-    def _dict_to_list(data):
-        """MONAI Dataset requires a list indexed by integers.
-        Convert {patient_id: record, ...} → [{patient_id: id, ...}, ...].
-        Also coerces label/event to float/int so ToTensord can handle JSON files
-        where these fields are stored as strings (e.g. "469" instead of 469).
-        Keys unused by the transform pipeline ('dti', 'clinical') are dropped so
-        MONAI's collate function never sees inconsistent keys across records
-        (e.g. LOSO splits mix UPENN patients with DTI and non-UPENN without).
-        """
-        _DROP_KEYS = {"dti", "clinical"}
-        if isinstance(data, dict):
-            items = []
-            for pid, record in data.items():
-                item = {k: v for k, v in record.items() if k not in _DROP_KEYS}
-                item["patient_id"] = pid
-                item["label"] = float(item["label"])
-                item["event"] = float(item["event"])
-                items.append(item)
-            # MONAI collate fails if keys are inconsistent across records in a batch.
-            # If any record is missing 'seg' (e.g. BraTS records in LOSO splits),
-            # drop it from all records so every batch sees the same key set.
-            if items and not all("seg" in item for item in items):
-                n_missing = sum(1 for item in items if "seg" not in item)
-                logging.warning(
-                    f"'seg' missing in {n_missing}/{len(items)} records — "
-                    "dropping 'seg' from all records; seg-weighted transforms will be unavailable"
-                )
-                for item in items:
-                    item.pop("seg", None)
-            return items
-        return data
-
-    train_data = _dict_to_list(json_data.get("train", None))
-    val_data   = _dict_to_list(json_data.get("validation", None))
-    test_data  = _dict_to_list(json_data.get("test", None))
-
-    def _drop_nan_labels(data, split_name):
-        if data is None:
-            return data
-        import math
-        if isinstance(data, dict):
-            filtered = {k: v for k, v in data.items() if not math.isnan(float(v["label"]))}
-            dropped = len(data) - len(filtered)
-        else:
-            filtered = [v for v in data if not math.isnan(float(v["label"]))]
-            dropped = len(data) - len(filtered)
-        if dropped:
-            logger.warning(f"{split_name}: dropped {dropped} records with NaN label")
-        return filtered
-
-    train_data = _drop_nan_labels(train_data, "Training")
-    val_data   = _drop_nan_labels(val_data,   "Validation")
-    test_data  = _drop_nan_labels(test_data,  "Testing")
+    train_data, val_data, test_data = load_split_data(config["data"]["json_file"])
 
     # check the amount of censoring in each split
     check_censoring(train_data, "Training")
@@ -694,27 +512,10 @@ def main():
 
     train_transforms, val_transforms = custom_transform(config)
 
-    if args.predict_only:
-        # no need to cache if we are only predicting
-        train_cache_rate = 0.0
-        val_cache_rate = 0.0
-    else:
-        train_cache_rate = config["data"].get("train_cache_rate", 0.0)
-        val_cache_rate = config["data"].get("val_cache_rate", 0.0)
-
-    # CacheDataset will cache up to the first Randomizable transformation, in our context this will mainly be the loading,
-    # the orientation / spacing transforms, and normalizations
-    train_ds = CacheDataset(data=train_data, transform=train_transforms, cache_rate=train_cache_rate, num_workers=4) if train_data else None
-    val_ds   = CacheDataset(data=val_data,   transform=val_transforms, cache_rate=val_cache_rate, num_workers=4) if val_data else None
-    # no need to cache the test set
-    test_ds  = Dataset(data=test_data,  transform=val_transforms) if test_data else None
-    # create a ds for the training set with validation transforms for final eval
-    eval_train_ds = Dataset(data=train_data, transform=val_transforms) if train_data else None
-
-    train_loader = DataLoader(train_ds, batch_size=config["data"]["batch_size"], shuffle=True, num_workers=config["data"]["workers"], pin_memory=True, persistent_workers=True) if train_ds else None
-    val_loader   = DataLoader(val_ds,   batch_size=config["data"]["val_batch_size"], shuffle=False, num_workers=config["data"]["workers"], pin_memory=True, persistent_workers=True) if val_ds else None
-    test_loader  = DataLoader(test_ds,  batch_size=config["data"]["val_batch_size"], shuffle=False, num_workers=config["data"]["workers"], pin_memory=True, persistent_workers=True) if test_ds else None
-    eval_train_dataloader = DataLoader(eval_train_ds, batch_size=config["data"]["val_batch_size"], shuffle=False, num_workers=config["data"]["workers"], pin_memory=True, persistent_workers=True) if eval_train_ds else None
+    train_loader, val_loader, test_loader, eval_train_dataloader = build_loaders(
+        config, train_data, val_data, test_data, train_transforms, val_transforms,
+        predict_only=args.predict_only,
+    )
 
     model = create_model(config, args.predict_only)
 
@@ -734,7 +535,7 @@ def main():
 
     if not args.predict_only:
         trainer.train(train_loader, val_loader, disable_pbar=args.disable_progress_bar)
-    
+
     print("\n", "-"*80)
     logger.info("Starting the final evaluation and saving")
     print("-"*80, "\n")
@@ -803,17 +604,12 @@ def main():
 
     if pred_path is not None:
         logger.info("Saving predictions...")
-        if train_preds is not None:
-            train_preds.to_csv(os.path.join(pred_path, f"{config['output']['save_name']}_train_predictions.csv"), index=False)
-            logger.info("Saved training set predictions")
-        if val_preds is not None:
-            val_preds.to_csv(os.path.join(pred_path, f"{config['output']['save_name']}_val_predictions.csv"), index=False)
-            logger.info("Saved validation set predictions")
-        if test_preds is not None:
-            test_preds.to_csv(os.path.join(pred_path, f"{config['output']['save_name']}_test_predictions.csv"), index=False)
-            logger.info("Saved test set predictions")
+        save_prediction_csvs(
+            {"train": train_preds, "val": val_preds, "test": test_preds},
+            pred_path, config["output"]["save_name"],
+        )
     else:
         logger.warning("No prediction directory specified in config, skipping predictions")
-    
+
 if __name__ == "__main__":
     main()
