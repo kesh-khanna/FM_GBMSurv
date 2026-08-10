@@ -51,7 +51,6 @@ class ModelTrainer:
         assert self.evaluation_strategy in ["best_val_cindex", "last_epoch"], \
             f"evaluation_strategy must be one of: best_val_cindex, or last_epoch. Got: {self.evaluation_strategy}"
 
-        # testing out mixed precision. generally safe and may let us use a larger batch size
         self.scaler = GradScaler(enabled=self.config["training"]["mixed_precision"])
 
         # how often to save a standard checkpoint
@@ -173,6 +172,20 @@ class ModelTrainer:
         logger.info(f"Model loaded from: epoch {self.epoch}, global step {self.global_step}")
 
         return True
+
+    def load_weights_for_eval(self, checkpoint_path):
+        """Load only the model weights from a checkpoint for evaluation.
+
+        Unlike load_checkpoint, this does not restore optimizer/scheduler/scaler
+        or trainer bookkeeping, and it raises instead of returning False so a
+        bad path can never silently fall through to an untrained model.
+        """
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Checkpoint {checkpoint_path} not found")
+
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        logger.info(f"Evaluation weights loaded from {checkpoint_path} (epoch {checkpoint.get('epoch')})")
     
     def select_checkpoint_for_evaluation(self, predict_only=False, checkpoint_path=None):
         """
@@ -181,28 +194,35 @@ class ModelTrainer:
         # if we are in predict only mode then 
         # Select eval_checkpoint based on configuration
         if predict_only:
-            logger.info("Running in prediction mode, using the passed eval_checkpoint if available")
-            if checkpoint_path:
-                eval_checkpoint = checkpoint_path
-                if not os.path.exists(eval_checkpoint):
-                    logger.error(f"Checkpoint path {eval_checkpoint} does not exist, exiting")
-                    return
-            else:
-                logger.error("predict_only mode requires checkpoint_path in config")
-                return
-        
+            logger.info("Running in prediction mode, using the passed eval_checkpoint")
+            if not checkpoint_path:
+                raise ValueError(
+                    "predict_only mode requires a checkpoint: set model.checkpoint_path in the "
+                    "config or pass --checkpoint. Refusing to evaluate an untrained model."
+                )
+            eval_checkpoint = checkpoint_path
+            if not os.path.exists(eval_checkpoint):
+                raise FileNotFoundError(f"Checkpoint path {eval_checkpoint} does not exist")
+
         # in these cases we want to always eval with the last model
         elif self.evaluation_strategy == "last_epoch":
             eval_checkpoint = os.path.join(self.checkpoint_dir, f"last_epoch_{self.epoch}.ckpt")
+            if not os.path.exists(eval_checkpoint):
+                raise FileNotFoundError(
+                    f"Expected last-epoch checkpoint at {eval_checkpoint} but it does not exist"
+                )
             logger.info(f"Using last epoch model: {eval_checkpoint}")
-        
+
         elif self.saved_checkpoints and self.evaluation_strategy == "best_val_cindex":
             eval_checkpoint = self.saved_checkpoints[-1]
             logger.info(f"Using best validation model: {eval_checkpoint}")
-        
+
         else:
-            logger.warning("No checkpoints found, using current model state")
-            eval_checkpoint = None
+            raise RuntimeError(
+                f"No checkpoint available for evaluation_strategy='{self.evaluation_strategy}'. "
+                "best_val_cindex requires a validation split so best-val checkpoints are saved; "
+                "use evaluation_strategy='last_epoch' or provide validation data."
+            )
 
         # logger.info(f"Selected {eval_checkpoint} as our checkpoint to be used for evaluation")
     
@@ -521,7 +541,7 @@ class ModelTrainer:
         Evaluate for testing and store the final predictions for potential saving.
         """
         if checkpoint_path:
-            self.load_checkpoint(checkpoint_path=checkpoint_path)
+            self.load_weights_for_eval(checkpoint_path)
 
         self.model.eval()
 
@@ -588,6 +608,8 @@ def create_parser():
     parser = argparse.ArgumentParser(description="FL_BrainSurViT Driver")
     parser.add_argument("--config_file", required=True, type=str, help="Path to YAML config for the model and training")
     parser.add_argument("--predict_only", action="store_true", help="Only make predictions")
+    parser.add_argument("--checkpoint", type=str, default=None,
+                        help="Checkpoint to evaluate; overrides model.checkpoint_path from the config")
     parser.add_argument("--disable_progress_bar", action="store_true", help="Disable progress bar for training and validation")
     return parser
 
@@ -597,6 +619,9 @@ def main():
     args = parser.parse_args()
 
     config = load_config(args.config_file)
+    if args.checkpoint:
+        logger.info(f"Overriding model.checkpoint_path with --checkpoint {args.checkpoint}")
+        config["model"]["checkpoint_path"] = args.checkpoint
     set_seed(config["training"]["seed"])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     set_track_meta(True)
@@ -714,7 +739,9 @@ def main():
     logger.info("Starting the final evaluation and saving")
     print("-"*80, "\n")
     eval_checkpoint = trainer.select_checkpoint_for_evaluation(predict_only=args.predict_only, checkpoint_path=config["model"].get("checkpoint_path", None))
-    
+    # load the weights once here; eval_predict below is then called without a checkpoint path
+    trainer.load_weights_for_eval(eval_checkpoint)
+
     # start a small results summary
     results_summary = {
         "eval_checkpoint": eval_checkpoint
@@ -729,7 +756,6 @@ def main():
     if test_loader:
         test_results, test_preds = trainer.eval_predict(
             test_loader,
-            checkpoint_path=eval_checkpoint,
             disable_pbar=args.disable_progress_bar,
             dataset_name="Test",
         )
@@ -745,7 +771,6 @@ def main():
         logger.info("Evaluating on training set with validation transforms...")
         train_results, train_preds = trainer.eval_predict(
             eval_train_dataloader,
-            checkpoint_path=eval_checkpoint,
             disable_pbar=args.disable_progress_bar,
             dataset_name="Training",
         )
@@ -760,7 +785,6 @@ def main():
         logger.info("Evaluating on validation set...")
         val_results, val_preds = trainer.eval_predict(
             val_loader,
-            checkpoint_path=eval_checkpoint,
             disable_pbar=args.disable_progress_bar,
             dataset_name="Validation",
         )

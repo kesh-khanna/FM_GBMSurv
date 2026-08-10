@@ -1,5 +1,5 @@
 from monai.transforms.transform import MapTransform
-from monai.transforms.croppad.dictionary import RandWeightedCropd, CropForegroundd, RandSpatialCropd, SpatialPadd, CenterSpatialCropd
+from monai.transforms.croppad.dictionary import RandWeightedCropd, CropForegroundd, RandSpatialCropd, SpatialPadd, CenterSpatialCropd, DivisiblePadd
 from monai.transforms.intensity.dictionary import ScaleIntensityRangePercentilesd, NormalizeIntensityd
 from monai.transforms.compose import Compose
 from monai.transforms.io.dictionary import LoadImaged
@@ -382,3 +382,140 @@ RandGaussianSmoothd(keys=["image1", "image2", "image3", "image4"], prob=0.2),
 RandGaussianNoised(keys=["image1", "image2", "image3", "image4"], prob=0.2, std=0.05),
 RandAdjustContrastd(keys=["image1", "image2", "image3", "image4"], prob=0.2, gamma=(0.7, 1.3)),
 """
+
+
+def get_extraction_transform(config):
+    """
+    Build the deterministic transform used for frozen embedding extraction
+    (extract_embeddings.py). Ported from the FM_Extraction sister repo.
+
+    Reads data.roi_type / data.patch_shape (single pipeline, no train/val split,
+    no augmentation). Supported roi_type values: center_crop, tight_brain,
+    tumor_centered, resize, full_volume
+    """
+    orientation = config["data"].get("orientation", "RAS")
+    valid_orientations = ["RAS", "LPS", "LAS", "RPS", "RAI", "LPI", "LAI", "RPI"]
+    if orientation not in valid_orientations:
+        raise ValueError(f"Invalid orientation: {orientation}. Must be one of {valid_orientations}")
+
+    roi_type = config["data"].get("roi_type", None)
+    if roi_type is None:
+        print("No ROI type provided in the config, falling back to center_crop")
+        roi_type = config["data"]["roi_type"] = "center_crop"
+
+    # tight_brain produces variable-size volumes; the ViT-based BrainIAC backbone
+    # needs a fixed input (learned positional embeddings), so it is incompatible.
+    if roi_type == "tight_brain" and config.get("model", {}).get("type", "").lower() == "brainiac":
+        raise ValueError(
+            "roi_type='tight_brain' is incompatible with model.type='brainiac': "
+            "the ViT backbone requires a fixed input size. Use roi_type='resize' "
+            "(to 96^3) for BrainIAC instead."
+        )
+
+    patch_shape = config["data"].get("patch_shape", None)
+    if patch_shape is None:
+        print("No patch shape provided, falling back to 160^3")
+        patch_shape = config["data"]["patch_shape"] = [160, 160, 160]
+
+    if roi_type == "center_crop":
+        print("Using center cropping")
+        transform = Compose([
+            LoadImaged(keys=['image']),
+            EnsureChannelFirstd(keys=["image"]),
+            get_normalization_transform(config),
+            Orientationd(keys=['image'], axcodes=orientation, labels=None),
+            Spacingd(keys=['image'], pixdim=(1.0, 1.0, 1.0), mode='bilinear'),
+            CropForegroundd(keys=['image'], source_key='image', margin=1),
+            CenterSpatialCropd(keys=['image'], roi_size=patch_shape),
+            SpatialPadd(keys=['image'], spatial_size=patch_shape, mode='constant'),
+            DeleteItemsd(keys=['seg']),
+            ToTensord(keys=["image", "label", "event"], dtype=torch.float32, track_meta=False, allow_missing_keys=False)
+        ])
+
+    elif roi_type == "tight_brain":
+        # Full-brain crop, as tight as possible to brain tissue, with each spatial
+        # dim expanded to the next multiple of `size_divisor`. Produces a
+        # variable-size volume per patient, so it only works with batch_size=1.
+        divisor = config["data"].get("size_divisor", 32)
+        margin = config["data"].get("fg_margin", 0)
+        max_size = config["data"].get("max_spatial_size", None)
+        print(f"Using tight brain crop (divisible by {divisor}, margin {margin})")
+        steps = [
+            LoadImaged(keys=['image']),
+            EnsureChannelFirstd(keys=["image"]),
+            get_normalization_transform(config),
+            Orientationd(keys=['image'], axcodes=orientation, labels=None),
+            Spacingd(keys=['image'], pixdim=(1.0, 1.0, 1.0), mode='bilinear'),
+            CropForegroundd(keys=['image'], source_key='image', margin=margin,
+                            k_divisible=divisor, mode='constant'),
+        ]
+        # optional cap so very large heads don't OOM / drift too far from pretrain size
+        if max_size is not None:
+            steps += [
+                CenterSpatialCropd(keys=['image'], roi_size=max_size),
+                DivisiblePadd(keys=['image'], k=divisor, mode='constant'),
+            ]
+        steps += [
+            DeleteItemsd(keys=['seg']),
+            ToTensord(keys=["image", "label", "event"], dtype=torch.float32,
+                      track_meta=False, allow_missing_keys=False),
+        ]
+        transform = Compose(steps)
+
+    elif roi_type == "tumor_centered":
+        print("Using tumor-centered cropping")
+        transform = Compose([
+            LoadImaged(keys=['image', "seg"], allow_missing_keys=True),
+            EnsureChannelFirstd(keys=["image", "seg"], allow_missing_keys=True),
+            get_normalization_transform(config),
+            Orientationd(keys=['image', "seg"], axcodes=orientation, allow_missing_keys=True, labels=None),
+            Spacingd(keys=['image', "seg"], pixdim=(1.0, 1.0, 1.0), mode=['bilinear', 'nearest'], allow_missing_keys=True),
+            CropForegroundd(keys=['image', "seg"], source_key='image', allow_missing_keys=True),
+            Lambdad(
+                keys=['seg'],
+                func=lambda x: (x > 0).astype(np.float32),
+                allow_missing_keys=True
+            ),
+            TumorCenterCrop(
+                keys=['image'],
+                seg_key='seg',
+                spatial_size=patch_shape
+            ),
+            DeleteItemsd(keys=['seg']),
+            SpatialPadd(keys=['image'], spatial_size=patch_shape, mode='constant'),
+            ToTensord(keys=["image", "label", "event"], dtype=torch.float32, track_meta=False, allow_missing_keys=False)
+        ])
+
+    elif roi_type == "resize":
+        print("Using global resize (BrainIAC-style)")
+        transform = Compose([
+            LoadImaged(keys=['image']),
+            EnsureChannelFirstd(keys=["image"]),
+            get_normalization_transform(config),
+            Resized(keys=['image'], spatial_size=patch_shape, mode="trilinear"),
+            ToTensord(keys=["image", "label", "event"], dtype=torch.float32, track_meta=False)
+        ])
+
+    elif roi_type == "full_volume":
+        print("Using full volume (foreground crop + pad)")
+        transform = Compose([
+            LoadImaged(keys=['image']),
+            EnsureChannelFirstd(keys=["image"]),
+            get_normalization_transform(config),
+            Orientationd(keys=['image'], axcodes=orientation, labels=None),
+            Spacingd(keys=['image'], pixdim=(1.0, 1.0, 1.0), mode='bilinear'),
+            CropForegroundd(keys=['image'], source_key='image'),
+            # Center-clip first (handles brains larger than target), then pad if smaller
+            CenterSpatialCropd(keys=['image'], roi_size=patch_shape),
+            SpatialPadd(keys=['image'], spatial_size=patch_shape, mode='constant'),
+            DeleteItemsd(keys=['seg']),
+            ToTensord(keys=["image", "label", "event"], dtype=torch.float32, track_meta=False),
+        ])
+
+    else:
+        raise ValueError(
+            f"Unsupported roi_type: {roi_type}. "
+            f"Supported types: center_crop, tight_brain, tumor_centered, resize, full_volume"
+        )
+
+    return transform

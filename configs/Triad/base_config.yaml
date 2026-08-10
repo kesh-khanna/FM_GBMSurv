@@ -1,0 +1,62 @@
+data:
+  json_file: "path/to/fold_N.json"
+  batch_size: 8
+  val_batch_size: 1
+  workers: 8
+  train_roi_type: "random"
+  val_roi_type: "center_crop"
+  train_cache_rate: 0.0
+  val_cache_rate: 0.0
+  normalization_method: "z_score"
+  val_patch_shape: [96, 96, 96]
+  train_patch_shape: [96, 96, 96]
+
+model:
+  type: "triadswb"
+  in_chans: 4
+  out_channels: 1
+  img_size: 96
+  feature_size: 48       # embed_dim; skip dims = (48+96+192+384+768) = 1488
+  depths: [2, 2, 2, 2]
+  drop_rate: 0.0
+  attn_drop_rate: 0.0
+  drop_path_rate: 0.0
+  hidden_dims: [192]
+
+  use_pretrained_weights: true
+  pretrained_weights: "/data/nextgen/keshk/foundation_models/Triad/weights/Triad-SwinB-SimMIM.pth"
+  checkpoint_path: ""
+
+  train_patch_embed: true
+  train_layer1: true
+  train_layer2: true
+  train_layer3: true
+  train_layer4: true
+  train_all_layernorm: true
+  layernorm_only: false
+
+  pooling_method: "gap"  
+  return_embeddings: false
+
+training:
+  max_epochs: 25
+  seed: 42
+  backbone_lr: 5e-5
+  head_lr: 1e-4
+  reg_weight: 1e-5
+  warmup_epochs: 5
+  mixed_precision: true
+  patience: 5
+  checkpoint_frequency: 25
+  new_time: 365.0
+  save_top_k: 2
+  lrscheduler: "cosine_anneal"
+  optim_name: "adamw"
+  shift_intensity: 0.3
+  scale_intensity: 0.3
+  evaluation_strategy: "last_epoch"
+
+output:
+  path: "/data/nextgen/keshk/foundation_models/FM_GBMSurv/out/"
+  save_name: "triadswb_simmim"
+  prediction_dir: "predictions"

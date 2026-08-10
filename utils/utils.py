@@ -6,7 +6,8 @@ def check_censoring(data, split_name):
     check the censoring rate of the dataset
     """
     if data:
-        num_events = sum([d['event'] for d in data])
+        items = data.values() if isinstance(data, dict) else data
+        num_events = sum([int(d['event']) for d in items])
         num_censored = len(data) - num_events
         censoring_rate = num_censored / len(data)
         print(f"{split_name} - Total: {len(data)}, Events: {num_events}, Censored: {num_censored}, Censoring Rate: {censoring_rate:.2f}")

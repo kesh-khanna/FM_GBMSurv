@@ -22,3 +22,6 @@ def clear_memory():
 def set_bn_eval(m):
     if isinstance(m, torch.nn.modules.batchnorm._BatchNorm):
         m.eval()
+
+from torch.utils.data import default_collate
+
