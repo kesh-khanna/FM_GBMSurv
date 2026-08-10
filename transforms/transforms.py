@@ -1,4 +1,4 @@
-from monai.transforms.transform import MapTransform
+from monai.transforms.transform import MapTransform, Randomizable
 from monai.transforms.croppad.dictionary import RandWeightedCropd, CropForegroundd, RandSpatialCropd, SpatialPadd, CenterSpatialCropd, DivisiblePadd
 from monai.transforms.intensity.dictionary import ScaleIntensityRangePercentilesd, NormalizeIntensityd
 from monai.transforms.compose import Compose
@@ -9,7 +9,7 @@ from monai.transforms.intensity.dictionary import RandShiftIntensityd, RandScale
 import numpy as np 
 import torch
 
-class SmartWeightedCrop(MapTransform):
+class SmartWeightedCrop(Randomizable, MapTransform):
     """
     Weighted crop if seg exists, otherwise random crop.
     Uses dictionary transforms to ensure same crop applied to all keys.
@@ -18,7 +18,7 @@ class SmartWeightedCrop(MapTransform):
         super().__init__(keys)
         self.spatial_size = spatial_size
         self.seg_key = seg_key
-        
+
         self.weighted_crop = RandWeightedCropd(
             keys=keys,
             w_key=seg_key,
@@ -26,12 +26,21 @@ class SmartWeightedCrop(MapTransform):
             num_samples=1,
         )
         self.random_crop = RandSpatialCropd(
-            keys=keys, 
+            keys=keys,
             roi_size=spatial_size,
             random_size=False,
             allow_missing_keys=True
         )
-    
+
+    def set_random_state(self, seed=None, state=None):
+        super().set_random_state(seed, state)
+        self.weighted_crop.set_random_state(seed, state)
+        self.random_crop.set_random_state(seed, state)
+        return self
+
+    def randomize(self, data=None):
+        pass  # the inner crops randomize themselves in __call__
+
     def __call__(self, data):
         d = dict(data)
         
