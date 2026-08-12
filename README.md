@@ -9,11 +9,15 @@ This repo implements end-to-end survival prediction using structural MRI scans (
 
 + **BrainMVP [(Paper)](https://arxiv.org/abs/2410.10604) [(GitHub)](https://github.com/shaohao011/BrainMVP)**: The BrainMVP is a brain-focused foundation model based on the Uniformer architecture that utilizes a multi-modal contrastive learning framework across 16,022 brain MRI scans from multiple different datasets and disease types.
 
++ **BrainIAC [(Paper)](https://doi.org/10.1038/s41593-026-02202-6) [(GitHub)](https://github.com/AIM-KannLab/BrainIAC)**: BrainIAC (Brain Imaging Adaptive Core) is vision based foundation model for generalized structural Brain MRI analysis. 
+
++ **TRIAD [(Paper)](https://www.sciencedirect.com/science/article/pii/S1361841526000617) [(GitHub)](https://github.com/wangshansong1/Triad)**: Triad is a vision foundation model for 3D MRI segmentation, classification, and registration trained from 129K 3D MRI volumes based on SimMIM framework.
+
 ## Features
 
 + Multi-modal MRI processing (4-channel input: T1, FLAIR, T1GD, T2)
-+ Support for multiple pretrained backbones (BrainMVP, BrainSegFounder)
-+ Support for multiple feature map pooling strategies (gap, max, gem)
++ Support for multiple pretrained backbones (BrainMVP, BrainSegFounder, Traid, BrainIAC)
++ Support for multiple feature map pooling strategies (gap, max, gem) and scales
 + Flexible fine-tuning strategies with backbone layer freezing
 + Survival analysis with Cox proportional hazards loss
 + Multiple ROI sampling strategies (random, tumor-centered, segmentation-weighted)
@@ -34,7 +38,7 @@ pip install -r requirements.txt
 ```
 ## Data Format
 
-The framework expects a JSON file containing train/validation/test splits with the following structure:
+The code expects a JSON file containing train/validation/test splits with the following structure:
 
 ```json
 {
@@ -77,6 +81,10 @@ Download the pre-trained weights for your chosen backbone:
 + For Glioma specific pretraining, download weights from /BraTS/ssl
 + Choose any one of the available folds
 
+**BrainIAC**: [Dropbox](https://www.dropbox.com/scl/fo/i51xt63roognvt7vuslbl/AG99uZljziHss5zJz4HiFis?dl=0&e=1&rlkey=9w55le6tslwxlfz6c0viylmjb&st=b9cnvwh8))
+
+**TRIAD**: [Google Drive](https://drive.google.com/file/d/1icLjmSpTdEAA9kEW3BWHnAYv-hsXMYxS/view?pli=1)
+
 Place the weights in your desired directory and update the `pretrained_weights` path in your configuration file.
 
 ## Configuration
@@ -96,7 +104,7 @@ We attempted to make the configurations matching, but some parameters are model 
 + `train_patch_shape` and `val_patch_shape`: Determines the size of ROIs
 
 **Model Parameters:**
-+ `type`: Model architecture (`brainmvp` or `brainseg`)
++ `type`: Model architecture (`brainmvp`, `brainseg`, `brainiac`, `triad`)
 + `pretrained_weights`: Path to pretrained backbone weights
 + `use_pretrained_weights`: Whether or not to load the provided pretraining weights
 + `checkpoint_path`: Path to checkpoint for prediction-only mode
@@ -109,9 +117,9 @@ We attempted to make the configurations matching, but some parameters are model 
 
 ## Usage
 
-### Training
+### Finetuning
 
-Train a model using a configuration file:
+Finetune a model using a configuration file:
 
 ```bash
 python driver.py --config_file configs/brainmvp_config.yaml
@@ -126,13 +134,6 @@ Run inference on test data using a given checkpoint:
 
 ```bash
 python driver.py --config_file configs/brainmvp_config.yaml --predict_only
-```
-
-When using `--predict_only`, make sure your config file includes the desired checkpoint path:
-
-```yaml
-model:
-  checkpoint_path: "/path/to/your/checkpoint.ckpt"
 ```
 
 ### Output Structure
@@ -229,18 +230,6 @@ model:
 + **`center_crop`**: Center crop of specified size from foreground cropped volume
 + **`tumor_centered`**: Crop centered on tumor centroid
 
-## A Few Tips and Best Practices
-
-1. **Batch Size**: Larger batches provide better within-batch risk estimations. This is especially the case when the event-rate is low.
-
-2. **Learning Rates**: 
-   + If fully finetuning, finetune backbone lightly.
-   + i.e. backbone_lr=1e-5, head_lr=1e-4
-
-3. **Normalization**: 
-   + BrainMVP: was trained with `percentile`
-   + BrainSegFounder: was trained with `z_score`
-
 
 ## Citation
 + to be added upon publication
@@ -251,5 +240,7 @@ model:
 ## Additional Acknowledgements and Thanks To:
 + BrainSegFounder Team
 + BrainMVP Team
++ TRIAD Team
++ BrainIAC Team
 + MONAI Framework Team
 + TorchSurv Library Team
