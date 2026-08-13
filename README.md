@@ -3,7 +3,7 @@
 A deep learning framework for performing survival prediction in GBM using multimodal MRIs and pretrained feature extactors.
 
 ## Overview 
-This repo implements end-to-end survival prediction using structural MRI scans (T1,T2-FLAIR,T1GD,T2). The framework currently supports two pretrained backbone architectures:
+This repo implements end-to-end survival prediction using structural MRI scans (T1,T2-FLAIR,T1GD,T2). The framework currently supports four pretrained backbone architectures:
 
 + **BrainSegFounder [(Paper)](https://www.sciencedirect.com/science/article/pii/S1361841524002263) [(GitHub)](https://github.com/lab-smile/BrainSegFounder)**: The BrainSegFounder is a multi-modal 3D MRI foundation model, built with a SwinVit encoder. This model was pretrained on unlabeled volumes from healthy participants at the UK Biobank and unlabeled volumes from patients with gliomas in the [BraTS challenge dataset](https://www.cancerimagingarchive.net/analysis-result/rsna-asnr-miccai-brats-2021/)
 
@@ -91,7 +91,7 @@ Place the weights in your desired directory and update the `pretrained_weights` 
 
 The framework uses YAML configuration files. All experiment parameters are specified through these config files. This includes the model architecture, model component freezing strategies, training hyperparameters, and preprocessing approaches. 
 
-We attempted to make the configurations matching, but some parameters are model dependent and documented in the two provided base configs.
+We attempted to make the configurations matching, but some parameters are model dependent and documented in the four provided base configs.
 
 ### Key Configuration Parameters
 
