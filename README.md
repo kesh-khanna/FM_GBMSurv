@@ -143,14 +143,14 @@ Training creates the following directory structure:
 ```
 output/
 └── your_experiment_save_name/
-    ├── config.yaml                    # Saved configuration
-    ├── results_summary.json           # Final evaluation metrics
-    ├── tensorboard/                   # TensorBoard logs
-    ├── checkpoints/                   # Model checkpoints
-    │   ├── model_epoch_X_val_cindex_Y.ckpt  # Best models (if using best_val_cindex)
-    │   ├── last_epoch_Z.ckpt         # Last epoch checkpoint
-    │   └── epoch_N.ckpt              # Regular checkpoints
-    └── predictions/                   # Prediction CSVs (if specified)
+    ├── config.yaml                    
+    ├── results_summary.json           
+    ├── tensorboard/                   
+    ├── checkpoints/                 
+    │   ├── model_epoch_X_val_cindex_Y.ckpt
+    │   ├── last_epoch_Z.ckpt         
+    │   └── epoch_N.ckpt              
+    └── predictions/                  
         ├── {save_name}_train_predictions.csv
         ├── {save_name}_val_predictions.csv
         └── {save_name}_test_predictions.csv
@@ -232,10 +232,11 @@ model:
 
 
 ## Citation
-+ to be added upon publication
++ If you found any of this repo useful, please consider citing our paper:
 
-## License
-+ to be added
+
+> Khanna, R., Yu, F. et al. Foundation model-enhanced multimodal survival prediction in glioblastoma across multi-institutional cohorts. npj Precis. Onc. (2026). https://doi.org/10.1038/s41698-026-01641-5
+
 
 ## Additional Acknowledgements and Thanks To:
 + BrainSegFounder Team
